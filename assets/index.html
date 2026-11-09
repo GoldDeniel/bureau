@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bureau — agents at work</title>
+<style>
+  :root{
+    --bg:#0a0b0f; --panel:#101218; --panel2:#151824; --line:#232838;
+    --txt:#e7e9f0; --mut:#8b93a8; --dim:#5d6579;
+    --acc:#7c9cff; --acc2:#a78bfa; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; --pink:#f472b6;
+    --r:12px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--txt);
+    font:13px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    background-image:
+      radial-gradient(900px 500px at 85% -10%, rgba(124,156,255,.10), transparent 60%),
+      radial-gradient(700px 400px at 0% 100%, rgba(167,139,250,.07), transparent 60%);
+  }
+  button,input,select,textarea{font:inherit;color:inherit}
+  button{cursor:pointer;border:none;background:none}
+  a{color:var(--acc)}
+  ::selection{background:rgba(124,156,255,.3)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#2a3040;border-radius:10px;border:3px solid var(--bg)}
+  ::-webkit-scrollbar-track{background:transparent}
+
+  .app{display:grid;grid-template-columns:236px 1fr;height:100vh;overflow:hidden}
+
+  /* ---------- rail ---------- */
+  .rail{
+    display:flex;flex-direction:column;gap:14px;padding:18px 14px 14px;
+    border-right:1px solid var(--line);background:rgba(13,15,21,.7);
+    backdrop-filter:blur(8px);overflow-y:auto;
+  }
+  .brand{display:flex;align-items:center;gap:9px;font-weight:650;font-size:16px;letter-spacing:.2px}
+  .brand .mark{
+    width:24px;height:24px;border-radius:8px;display:grid;place-items:center;font-size:13px;
+    background:linear-gradient(140deg,var(--acc),var(--acc2));color:#0b0c10;
+    box-shadow:0 0 22px rgba(124,156,255,.45);
+  }
+  .brand .ver{color:var(--dim);font-size:10px;font-weight:500;margin-left:auto}
+  .btn{
+    display:inline-flex;align-items:center;justify-content:center;gap:6px;
+    padding:8px 10px;border-radius:9px;background:var(--panel2);border:1px solid var(--line);
+    color:var(--txt);font-size:12.5px;transition:.15s;
+  }
+  .btn:hover{background:#1c2130;border-color:#2e3650;transform:translateY(-1px)}
+  .btn:active{transform:none}
+  .btn.primary{
+    background:linear-gradient(135deg,var(--acc),#6d8bfa);border-color:transparent;color:#0a0b0f;
+    font-weight:650;box-shadow:0 6px 18px rgba(124,156,255,.25);
+  }
+  .btn.primary:hover{filter:brightness(1.07)}
+  .btn.ghost{background:transparent}
+  .btn.small{padding:5px 8px;font-size:11.5px;border-radius:7px}
+  .btn.danger{color:#ffb4b4;border-color:#40232a;background:#1d1417}
+  .rail-label{
+    display:flex;align-items:center;justify-content:space-between;
+    color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.12em;
+    margin:4px 4px -6px;
+  }
+  .rail-label button{color:var(--mut);font-size:15px;line-height:1;padding:0 2px}
+  .rail-label button:hover{color:var(--acc)}
+  nav.divs{display:flex;flex-direction:column;gap:2px}
+  .divlink{
+    display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;border-radius:8px;
+    color:var(--mut);text-align:left;font-size:12.5px;transition:.12s;
+  }
+  .divlink:hover{background:#171b26;color:var(--txt)}
+  .divlink.active{background:#1a2032;color:var(--txt);box-shadow:inset 2px 0 0 var(--acc)}
+  .dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--dim)}
+  .dot.c1{background:#7c9cff}.dot.c2{background:#f472b6}.dot.c3{background:#4ade80}
+  .dot.c4{background:#fbbf24}.dot.c5{background:#a78bfa}.dot.c6{background:#22d3ee}
+  .divlink .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cnt{
+    font-size:10.5px;color:var(--dim);background:#171b26;border:1px solid var(--line);
+    padding:0 6px;border-radius:20px;min-width:20px;text-align:center;
+  }
+  .cnt.hot{color:#dbe4ff;background:#1c2440;border-color:#2c3a63}
+  .agents-mini{display:flex;flex-direction:column;gap:5px}
+  .agent-row{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--mut);padding:2px 4px}
+  .agent-row .slug{color:var(--txt);font-family:ui-monospace,monospace;font-size:11px}
+  .agent-row .ad{margin-left:auto;font-size:10px;color:var(--dim);border:1px solid var(--line);padding:0 5px;border-radius:5px}
+  .st{width:6px;height:6px;border-radius:50%;background:#3a4152;flex:none}
+  .st.running{background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse 1.2s infinite}
+  .st.idle{background:#4b556b}
+  @keyframes pulse{50%{opacity:.35}}
+  .rail-foot{margin-top:auto;display:flex;flex-direction:column;gap:8px;padding-top:12px;border-top:1px solid var(--line)}
+  .foot-note{font-size:10.5px;color:var(--dim);display:flex;justify-content:space-between}
+
+  /* ---------- main ---------- */
+  main{display:flex;flex-direction:column;min-width:0;overflow:hidden}
+  .topbar{
+    display:flex;align-items:center;gap:16px;padding:18px 22px 14px;border-bottom:1px solid var(--line);
+  }
+  .topbar h1{margin:0;font-size:17px;font-weight:650;letter-spacing:.1px}
+  .topbar p{margin:2px 0 0;color:var(--mut);font-size:11.5px}
+  .top-actions{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .search{
+    display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line);
+    border-radius:9px;padding:0 9px;height:32px;width:210px;
+  }
+  .search input{background:none;border:none;outline:none;width:100%;font-size:12px}
+  .search span{color:var(--dim);font-size:12px}
+  .kbd{font-size:10px;color:var(--dim);border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px}
+
+  .board{
+    display:flex;gap:14px;padding:16px 22px 22px;overflow-x:auto;overflow-y:hidden;flex:1;align-items:stretch;
+  }
+  .col{
+    flex:1 1 210px;min-width:210px;max-width:360px;display:flex;flex-direction:column;max-height:100%;
+    background:rgba(16,18,24,.55);border:1px solid var(--line);border-radius:var(--r);
+  }
+  .col-head{display:flex;align-items:center;gap:8px;padding:11px 12px 9px;border-bottom:1px solid var(--line)}
+  .col-head .t{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--mut);font-weight:600}
+  .col-head .n{font-size:10.5px;color:var(--dim);margin-left:auto;background:#171b26;border-radius:20px;padding:0 6px}
+  .col.new .col-head .t{color:#9db4ff}
+  .col.review .col-head .t{color:#fcd34d}
+  .col.done .col-head .t{color:#6ee7a0}
+  .col.attention .col-head .t{color:#fca5a5}
+  .cards{padding:8px;display:flex;flex-direction:column;gap:7px;overflow-y:auto;min-height:40px;flex:1}
+  .card{
+    background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 10px;
+    cursor:pointer;transition:.13s;position:relative;
+  }
+  .card:hover{border-color:#33405f;transform:translateY(-1px);box-shadow:0 8px 20px rgba(0,0,0,.35)}
+  .card .ref{font-family:ui-monospace,monospace;font-size:10px;color:var(--dim);letter-spacing:.02em}
+  .card .ttl{margin:3px 0 7px;font-size:12.5px;line-height:1.4;color:#e9ecf5}
+  .card .meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .pill{font-size:10px;padding:1px 6px;border-radius:6px;border:1px solid var(--line);color:var(--mut);background:#12151e;white-space:nowrap}
+  .pill.p0{color:#ffb4b4;border-color:#4a2730;background:#1e1215}
+  .pill.p1{color:#fcd34d;border-color:#453a1d;background:#1d1a10}
+  .pill.p3,.pill.p4{color:#93a4c9}
+  .pill.who{color:#b9c6f5;border-color:#2b3550;background:#161b2a;font-family:ui-monospace,monospace;font-size:9.5px}
+  .pill.sub{color:#d8b4fe;border-color:#3b2a52;background:#1a1526}
+  .pill.ok{color:#86efac;border-color:#234132;background:#101d16}
+  .card .subs{margin-top:7px;padding-top:6px;border-top:1px dashed #242a3a;display:flex;flex-direction:column;gap:2px}
+  .card .subs div{font-size:10.5px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card .subs b{font-family:ui-monospace,monospace;font-weight:400;color:#6b7694}
+  .card.done{opacity:.55}
+  .card.blocked{border-color:#3a2529}
+  .empty{color:#4d566b;font-size:11px;text-align:center;padding:16px 8px;border:1px dashed #232838;border-radius:8px}
+
+  /* ---------- drawer ---------- */
+  .backdrop{position:fixed;inset:0;background:rgba(4,5,8,.55);opacity:0;pointer-events:none;transition:.2s;z-index:40}
+  .backdrop.show{opacity:1;pointer-events:auto}
+  .drawer{
+    position:fixed;top:0;right:0;height:100%;width:560px;max-width:92vw;z-index:50;
+    background:#0e1016;border-left:1px solid var(--line);transform:translateX(102%);
+    transition:transform .24s cubic-bezier(.2,.7,.2,1);display:flex;flex-direction:column;
+    box-shadow:-30px 0 60px rgba(0,0,0,.45);
+  }
+  .drawer.show{transform:none}
+  .dr-head{display:flex;align-items:flex-start;gap:10px;padding:18px 20px 12px;border-bottom:1px solid var(--line)}
+  .dr-head .ref{font-family:ui-monospace,monospace;font-size:11px;color:var(--acc)}
+  .dr-head h2{margin:4px 0 0;font-size:16px;line-height:1.35;font-weight:600;max-width:430px}
+  .dr-body{overflow-y:auto;padding:16px 20px 24px;display:flex;flex-direction:column;gap:14px}
+  .meta-grid{display:grid;grid-template-columns:90px 1fr 90px 1fr;gap:7px 10px;font-size:11.5px;align-items:center}
+  .meta-grid .k{color:var(--dim)}
+  .meta-grid select,.meta-grid input{
+    background:#141824;border:1px solid var(--line);border-radius:7px;padding:4px 7px;font-size:11.5px;outline:none;width:100%;
+  }
+  .meta-grid select:focus{border-color:#3a4a72}
+  .body-txt{white-space:pre-wrap;font-size:12.5px;color:#c9cfdd;background:#12151d;border:1px solid var(--line);border-radius:10px;padding:11px 12px;max-height:280px;overflow:auto}
+  .sec{font-size:10.5px;letter-spacing:.11em;text-transform:uppercase;color:var(--dim);margin:2px 0 -6px}
+  .result{border-left:2px solid var(--acc);background:#131a2a;padding:10px 12px;border-radius:0 8px 8px 0;font-size:12px;white-space:pre-wrap;color:#dbe3ff;max-height:260px;overflow:auto}
+  .kids{display:flex;flex-direction:column;gap:5px}
+  .kid{display:flex;align-items:center;gap:8px;background:#12151d;border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:11.5px;cursor:pointer}
+  .kid:hover{border-color:#31405f}
+  .kid .kr{font-family:ui-monospace,monospace;font-size:10px;color:var(--dim)}
+  .kid .kt{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .timeline{display:flex;flex-direction:column;gap:9px}
+  .cm{background:#12151d;border:1px solid var(--line);border-radius:9px;padding:8px 10px}
+  .cm .h{display:flex;gap:7px;align-items:center;font-size:10.5px;color:var(--dim);margin-bottom:3px}
+  .cm .who{font-family:ui-monospace,monospace;color:#9fb0d8;font-size:10px}
+  .cm .b{font-size:12px;white-space:pre-wrap;color:#cdd4e4}
+  .composer{display:flex;flex-direction:column;gap:7px}
+  .composer textarea{
+    background:#12151d;border:1px solid var(--line);border-radius:9px;padding:9px 10px;min-height:64px;
+    resize:vertical;outline:none;font-size:12px;
+  }
+  .composer textarea:focus{border-color:#33405f}
+  .dr-actions{display:flex;gap:7px;flex-wrap:wrap;padding-top:2px}
+
+  /* ---------- modal ---------- */
+  .modal-wrap{position:fixed;inset:0;z-index:60;display:none;align-items:center;justify-content:center;background:rgba(4,5,8,.6);padding:20px}
+  .modal-wrap.show{display:flex}
+  .modal{width:560px;max-width:100%;max-height:86vh;overflow-y:auto;background:#0f1118;border:1px solid var(--line);border-radius:16px;padding:20px;box-shadow:0 30px 80px rgba(0,0,0,.6)}
+  .modal h3{margin:0 0 2px;font-size:15px}
+  .modal p.sub{margin:0 0 14px;color:var(--mut);font-size:11.5px}
+  .field{display:flex;flex-direction:column;gap:5px;margin-bottom:11px}
+  .field label{font-size:10.5px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim)}
+  .field input,.field select,.field textarea{
+    background:#141824;border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:12.5px;outline:none;
+  }
+  .field textarea{min-height:90px;resize:vertical}
+  .field input:focus,.field textarea:focus,.field select:focus{border-color:#3a4a72}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
+  .agents-tbl{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+  .ag{display:grid;grid-template-columns:64px 1fr 96px 132px 26px;gap:7px;align-items:center;font-size:11px;background:#12151d;border:1px solid var(--line);border-radius:8px;padding:6px 8px}
+  .ag .s{font-family:ui-monospace,monospace;color:#c3cce4}
+  .ag .r{color:var(--dim);font-size:10px}
+  .ag input,.ag select{background:#0f1219;border:1px solid #232838;border-radius:6px;padding:3px 5px;font-size:10.5px;width:100%;outline:none}
+  .ag input[type=checkbox]{width:auto}
+  .evt{display:flex;gap:8px;font-size:11px;padding:5px 0;border-bottom:1px solid #1a1e2a;color:var(--mut)}
+  .evt b{font-family:ui-monospace,monospace;font-weight:400;color:#93a4c9;min-width:52px}
+  .evt .t{color:var(--dim);font-size:10px;margin-left:auto;white-space:nowrap}
+
+  /* ---------- toasts ---------- */
+  #toasts{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;gap:7px;z-index:90;align-items:center}
+  .toast{background:#161b26;border:1px solid #2c3550;color:#dfe6f7;font-size:12px;padding:8px 14px;border-radius:20px;box-shadow:0 10px 30px rgba(0,0,0,.5);animation:pop .2s ease-out}
+  .toast.err{border-color:#4a2730;background:#1e1215;color:#ffc9c9}
+  @keyframes pop{from{opacity:0;transform:translateY(6px)}}
+
+  @media (max-width:900px){
+    .app{grid-template-columns:1fr}
+    .rail{display:none}
+    .board{padding:12px}
+    .col{width:270px}
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="brand"><span class="mark">◈</span> Bureau <span class="ver" id="ver">v0</span></div>
+    <button class="btn primary" id="btn-new">+ New ticket</button>
+
+    <div class="rail-label"><span>Divisions</span><button id="btn-add-div" title="Add division">+</button></div>
+    <nav class="divs" id="divs"></nav>
+
+    <div class="rail-label"><span>Agents</span><button id="btn-agents" title="Manage agents">⋯</button></div>
+    <div class="agents-mini" id="agents-mini"></div>
+
+    <div class="rail-foot">
+      <button class="btn" id="btn-tick">▶ Run dispatch tick</button>
+      <button class="btn ghost small" id="btn-events">◷ Activity log</button>
+      <div class="foot-note"><span id="foot-stats">–</span><span id="foot-dispatch"></span></div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <div>
+        <h1 id="ttl">All divisions</h1>
+        <p id="sub">—</p>
+      </div>
+      <div class="top-actions">
+        <div class="search"><span>⌕</span><input id="search" placeholder="Filter tickets…"><span class="kbd">/</span></div>
+        <button class="btn ghost small" id="btn-done" title="Show the Done column">Done</button>
+        <button class="btn" id="btn-refresh" title="Refresh">↻</button>
+      </div>
+    </div>
+    <div class="board" id="board"></div>
+  </main>
+</div>
+
+<div class="backdrop" id="backdrop"></div>
+<aside class="drawer" id="drawer">
+  <div class="dr-head">
+    <div style="flex:1">
+      <div class="ref" id="dr-ref"></div>
+      <h2 id="dr-title"></h2>
+    </div>
+    <button class="btn ghost small" id="dr-close">✕</button>
+  </div>
+  <div class="dr-body" id="dr-body"></div>
+</aside>
+
+<div class="modal-wrap" id="modal-wrap"><div class="modal" id="modal"></div></div>
+<div id="toasts"></div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const ago = (iso) => {
+  if (!iso) return "";
+  const t = Date.parse(iso); if (isNaN(t)) return iso;
+  const d = Math.max(0, (Date.now() - t) / 1000);
+  if (d < 60) return "just now";
+  if (d < 3600) return Math.floor(d/60) + "m ago";
+  if (d < 86400) return Math.floor(d/3600) + "h ago";
+  return Math.floor(d/86400) + "d ago";
+};
+const COLS = [
+  {id:"new", label:"New", st:["new"]},
+  {id:"queued", label:"Queued", st:["triaged","queued"]},
+  {id:"working", label:"In progress", st:["in_progress"]},
+  {id:"review", label:"Review", st:["review"]},
+  {id:"done", label:"Done", st:["done"]},
+  {id:"attention", label:"Blocked", st:["blocked","failed"]},
+];
+
+const S = { snap:null, division:"all", q:"", openRef:null, openData:null, busy:false, timer:null, showDone:false };
+
+async function api(path, opts={}) {
+  const res = await fetch(path, {
+    headers: {"content-type":"application/json"},
+    ...opts,
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || (res.status + " " + res.statusText));
+  return data;
+}
+function toast(msg, err=false) {
+  const el = document.createElement("div");
+  el.className = "toast" + (err ? " err" : "");
+  el.textContent = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity .3s"; }, 2600);
+  setTimeout(() => el.remove(), 3000);
+}
+
+async function load() {
+  try {
+    const snap = await api("/api/state");
+    S.snap = snap;
+    renderRail(); renderBoard(); renderFoot();
+    if (S.openRef) refreshDrawer(true);
+  } catch (e) {
+    $("#foot-stats").textContent = "offline";
+  }
+}
+
+function divColor(i){ return "c" + ((i % 6) + 1); }
+
+function renderRail() {
+  const s = S.snap; if (!s) return;
+  $("#ver").textContent = "v" + s.version;
+  const all = s.tickets.length;
+  const open = s.tickets.filter(t => !["done","failed"].includes(t.status)).length;
+  let html = `<button class="divlink ${S.division==="all"?"active":""}" data-div="all">
+      <span class="dot" style="background:#7c9cff"></span>
+      <span class="nm">All divisions</span><span class="cnt ${open?"hot":""}">${open}</span></button>`;
+  s.divisions.forEach((d,i) => {
+    const n = d.counts.new + d.counts.triaged + d.counts.queued + d.counts.in_progress + d.counts.blocked + d.counts.failed;
+    html += `<button class="divlink ${S.division===d.slug?"active":""}" data-div="${esc(d.slug)}" title="${esc(d.project_path)}">
+      <span class="dot ${divColor(i)}"></span>
+      <span class="nm">${esc(d.name)}</span>
+      <span class="cnt ${n?"hot":""}">${n}</span></button>`;
+  });
+  $("#divs").innerHTML = html;
+  $("#divs").querySelectorAll("[data-div]").forEach(b => b.onclick = () => { S.division = b.dataset.div; renderRail(); renderBoard(); });
+
+  const cur = s.divisions.find(d => d.slug === S.division);
+  $("#ttl").textContent = cur ? cur.name : "All divisions";
+  $("#sub").textContent = cur
+    ? `${cur.manager ? "manager " + cur.manager.slug : "no manager"} · ${cur.project_path || "no path"}`
+    : `${s.divisions.length} divisions · ${s.agents.length} agents · ${s.tickets.length} tickets`;
+
+  const agents = cur ? s.agents.filter(a => a.division_id === cur.id) : s.agents;
+  const shown = agents.slice(0, 8);
+  $("#agents-mini").innerHTML = shown.map(a => `
+    <div class="agent-row" title="${esc(a.role)} · ${esc(a.adapter)}">
+      <span class="st ${a.status}"></span>
+      <span class="slug">${esc(a.slug)}</span>
+      <span>${esc(a.role === "manager" ? "manager" : "")}</span>
+      <span class="ad">${esc(a.adapter)}${a.model ? " · " + esc(a.model.split(":")[0]) : ""}${a.enabled ? "" : " · off"}</span>
+    </div>`).join("") + (agents.length > shown.length
+      ? `<div class="agent-row" style="color:#5d6579">+${agents.length - shown.length} more · <button class="btn ghost small" id="btn-more-agents" style="padding:0 4px">manage</button></div>`
+      : "") || `<div class="empty">no agents</div>`;
+  const more = $("#btn-more-agents"); if (more) more.onclick = agentsModal;
+}
+
+function visibleTickets() {
+  const s = S.snap; if (!s) return [];
+  let ts = s.tickets;
+  if (S.division !== "all") ts = ts.filter(t => t.division_slug === S.division);
+  if (S.q) ts = ts.filter(t => (t.ref + " " + t.title + " " + t.body).toLowerCase().includes(S.q));
+  return ts;
+}
+
+function card(t) {
+  const p = t.priority;
+  const subs = t.children.length
+    ? `<div class="subs">${t.children.slice(0,3).map(c =>
+        `<div><b>${esc(c.ref)}</b> ${esc(c.title)}</div>`).join("")}
+        ${t.children.length > 3 ? `<div>+${t.children.length-3} more</div>` : ""}</div>` : "";
+  return `<div class="card ${t.status==="done"?"done":""} ${["blocked","failed"].includes(t.status)?"blocked":""}" data-ref="${esc(t.ref)}">
+    <div class="ref">${esc(t.ref)} · ${esc(t.division_slug)}</div>
+    <div class="ttl">${esc(t.title)}</div>
+    <div class="meta">
+      <span class="pill p${p}">P${p}</span>
+      ${t.assignee_slug ? `<span class="pill who">${esc(t.assignee_slug)}</span>` : `<span class="pill">unassigned</span>`}
+      ${t.children.length ? `<span class="pill sub">${t.children.length} sub</span>` : ""}
+      ${t.comment_count ? `<span class="pill">${t.comment_count} 💬</span>` : ""}
+      ${t.attempts ? `<span class="pill">try ${t.attempts}</span>` : ""}
+    </div>
+    ${subs}
+  </div>`;
+}
+
+function renderBoard() {
+  const s = S.snap; if (!s) return;
+  const ts = visibleTickets();
+  const done = ts.filter(t => t.status === "done").length;
+  $("#btn-done").classList.toggle("primary", S.showDone);
+  $("#btn-done").textContent = `Done · ${done}`;
+  const cols = COLS.filter(c => S.showDone || c.id !== "done");
+  const board = $("#board");
+  const scrolls = [...board.querySelectorAll(".cards")].map(c => c.scrollTop);
+  board.innerHTML = cols.map(col => {
+    const items = ts.filter(t => col.st.includes(t.status))
+      .sort((a,b) => a.priority - b.priority || a.id - b.id);
+    return `<section class="col ${col.id}">
+      <div class="col-head"><span class="t">${col.label}</span><span class="n">${items.length}</span></div>
+      <div class="cards">${items.length ? items.map(card).join("") : `<div class="empty">nothing here</div>`}</div>
+    </section>`;
+  }).join("");
+  [...board.querySelectorAll(".cards")].forEach((c,i) => c.scrollTop = scrolls[i] || 0);
+  board.querySelectorAll(".card").forEach(c => c.onclick = () => openTicket(c.dataset.ref));
+}
+
+function renderFoot() {
+  const s = S.snap; if (!s) return;
+  $("#foot-stats").textContent = `${s.stats.open} open · ${s.stats.needs_review} to review`;
+  $("#foot-dispatch").textContent = s.dispatching ? "dispatching…" : (s.stats.running ? `${s.stats.running} running` : "idle");
+}
+
+/* ---------------- drawer ---------------- */
+async function openTicket(ref) {
+  S.openRef = ref;
+  $("#backdrop").classList.add("show");
+  $("#drawer").classList.add("show");
+  $("#dr-body").innerHTML = `<div class="empty">loading…</div>`;
+  await refreshDrawer(false);
+}
+function closeDrawer() {
+  S.openRef = null; S.openData = null;
+  $("#backdrop").classList.remove("show");
+  $("#drawer").classList.remove("show");
+}
+async function refreshDrawer(soft) {
+  if (!S.openRef) return;
+  try {
+    const d = await api("/api/tickets/" + encodeURIComponent(S.openRef));
+    S.openData = d; renderDrawer();
+  } catch (e) { if (!soft) toast(e.message, true); }
+}
+function renderDrawer() {
+  const d = S.openData; if (!d) return;
+  const t = d.ticket;
+  $("#dr-ref").textContent = `${t.ref} · ${t.division_slug} · opened by ${t.created_by} · ${ago(t.created_at)}`;
+  $("#dr-title").textContent = t.title;
+
+  const div = S.snap.divisions.find(x => x.id === t.division_id);
+  const agents = S.snap.agents.filter(a => a.division_id === t.division_id);
+  const kids = t.children.map(c => `
+    <div class="kid" data-ref="${esc(c.ref)}">
+      <span class="kr">${esc(c.ref)}</span>
+      <span class="pill">${esc(c.status)}</span>
+      <span class="kt">${esc(c.title)}</span>
+      <span class="pill who">${esc(c.assignee || "-")}</span>
+    </div>`).join("");
+  const comments = d.comments.map(c => `
+    <div class="cm"><div class="h"><span class="who">${esc(c.author)}</span><span>${ago(c.created_at)}</span></div>
+    <div class="b">${esc(c.body)}</div></div>`).join("");
+
+  const actions = [
+    t.status !== "done" ? `<button class="btn small" data-act="done">✓ Approve / done</button>` : `<button class="btn small" data-act="review">↺ Reopen</button>`,
+    t.status !== "blocked" ? `<button class="btn small danger" data-act="blocked">⊘ Block</button>` : "",
+    t.status !== "queued" ? `<button class="btn small" data-act="queued">→ Queue</button>` : "",
+  ].join("");
+
+  $("#dr-body").innerHTML = `
+    <div class="meta-grid">
+      <span class="k">Status</span>
+      <span><span class="pill ${t.status==="done"?"ok":""}">${esc(t.status)}</span></span>
+      <span class="k">Priority</span>
+      <select id="dr-prio">${[0,1,2,3,4].map(p => `<option value="${p}" ${p===t.priority?"selected":""}>P${p}</option>`).join("")}</select>
+      <span class="k">Division</span>
+      <span>${esc(div ? div.name : t.division_slug)}</span>
+      <span class="k">Assignee</span>
+      <select id="dr-assignee"><option value="">— unassigned —</option>
+        ${agents.map(a => `<option value="${esc(a.slug)}" ${a.slug===t.assignee_slug?"selected":""}>${esc(a.slug)} (${esc(a.role)})</option>`).join("")}
+      </select>
+    </div>
+    ${t.body ? `<div class="sec">Description</div><div class="body-txt">${esc(t.body)}</div>` : ""}
+    ${t.result ? `<div class="sec">Result</div><div class="result">${esc(t.result)}</div>` : ""}
+    ${kids ? `<div class="sec">Sub-tickets (${t.children.length})</div><div class="kids">${kids}</div>` : ""}
+    <div class="sec">Timeline</div>
+    <div class="timeline">${comments || `<div class="empty">no comments yet</div>`}</div>
+    <div class="composer">
+      <textarea id="dr-comment" placeholder="Add a comment for the agents or yourself…"></textarea>
+      <div style="display:flex;gap:7px">
+        <button class="btn small" id="dr-send">Comment</button>
+        <span style="margin-left:auto"></span>
+        ${actions}
+      </div>
+    </div>`;
+
+  $("#dr-body").querySelectorAll("[data-ref]").forEach(el => el.onclick = () => openTicket(el.dataset.ref));
+  $("#dr-close").onclick = closeDrawer;
+  $("#backdrop").onclick = closeDrawer;
+  $("#dr-prio").onchange = async (e) => {
+    await api("/api/tickets/" + t.ref, {method:"PATCH", body:{priority:+e.target.value}});
+    toast(`priority → P${e.target.value}`); load(); refreshDrawer(true);
+  };
+  $("#dr-assignee").onchange = async (e) => {
+    await api("/api/tickets/" + t.ref, {method:"PATCH", body:{assignee:e.target.value}});
+    toast(e.target.value ? `assigned to ${e.target.value}` : "unassigned"); load(); refreshDrawer(true);
+  };
+  $("#dr-send").onclick = async () => {
+    const box = $("#dr-comment");
+    if (!box.value.trim()) return;
+    await api("/api/tickets/" + t.ref + "/comment", {method:"POST", body:{body:box.value.trim()}});
+    box.value = ""; toast("comment added"); refreshDrawer(true); load();
+  };
+  $("#dr-body").querySelectorAll("[data-act]").forEach(b => b.onclick = async () => {
+    await api("/api/tickets/" + t.ref, {method:"PATCH", body:{status:b.dataset.act}});
+    toast(`${t.ref} → ${b.dataset.act}`); load(); refreshDrawer(true);
+  });
+}
+
+/* ---------------- modals ---------------- */
+function openModal(html) {
+  $("#modal").innerHTML = html;
+  $("#modal-wrap").classList.add("show");
+}
+function closeModal() { $("#modal-wrap").classList.remove("show"); }
+
+function newTicketModal() {
+  const s = S.snap;
+  const divs = s.divisions;
+  const cur = S.division === "all" ? divs[0] : divs.find(d => d.slug === S.division);
+  openModal(`<h3>New ticket</h3><p class="sub">No assignee means the division manager triages it.</p>
+    <div class="field"><label>Title</label><input id="nt-title" placeholder="What needs to happen?" autofocus></div>
+    <div class="field"><label>Description</label><textarea id="nt-body" placeholder="Context, constraints, acceptance criteria…"></textarea></div>
+    <div class="row2">
+      <div class="field"><label>Division</label><select id="nt-div">${divs.map(d => `<option value="${esc(d.slug)}" ${cur&&d.slug===cur.slug?"selected":""}>${esc(d.name)}</option>`).join("")}</select></div>
+      <div class="field"><label>Priority</label><select id="nt-prio">${[0,1,2,3,4].map(p => `<option value="${p}" ${p===2?"selected":""}>P${p}${p===0?" · urgent":p===1?" · high":p===3?" · low":p===4?" · someday":""}</option>`).join("")}</select></div>
+    </div>
+    <div class="field"><label>Assign directly (optional)</label><select id="nt-agent"><option value="">— let the manager decide —</option></select></div>
+    <div class="modal-actions"><button class="btn ghost" id="m-cancel">Cancel</button><button class="btn primary" id="m-create">Create ticket ✨</button></div>`);
+  const fillAgents = () => {
+    const slug = $("#nt-div").value;
+    const d = divs.find(x => x.slug === slug);
+    const ags = s.agents.filter(a => a.division_id === (d ? d.id : -1));
+    $("#nt-agent").innerHTML = `<option value="">— let the manager decide —</option>` +
+      ags.map(a => `<option value="${esc(a.slug)}">${esc(a.slug)} (${esc(a.role)})</option>`).join("");
+  };
+  fillAgents();
+  $("#nt-div").onchange = fillAgents;
+  $("#m-cancel").onclick = closeModal;
+  $("#m-create").onclick = async () => {
+    const title = $("#nt-title").value.trim();
+    if (!title) return toast("title is required", true);
+    try {
+      const r = await api("/api/tickets", {method:"POST", body:{
+        title, body:$("#nt-body").value, division:$("#nt-div").value,
+        priority:+$("#nt-prio").value, assignee:$("#nt-agent").value || null
+      }});
+      closeModal(); toast(`created ${r.ticket.ref}`); load(); openTicket(r.ticket.ref);
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#nt-title").onkeydown = (e) => { if (e.key === "Enter" && (e.metaKey||e.ctrlKey)) $("#m-create").click(); };
+}
+
+function agentsModal() {
+  const s = S.snap;
+  const group = s.divisions.map(d => {
+    const ags = s.agents.filter(a => a.division_id === d.id);
+    return `<div class="sec" style="margin-top:10px">${esc(d.name)} <span style="color:#3f4759">· ${esc(d.slug)}</span></div>
+      <div class="agents-tbl">${ags.map(a => `
+        <div class="ag" data-slug="${esc(a.slug)}">
+          <span class="s">${esc(a.slug)}</span>
+          <span class="r">${esc(a.role)}${a.status==="running"?" · running":""}</span>
+          <select class="f-adapter">${s.adapters.map(x => `<option ${x===a.adapter?"selected":""}>${x}</option>`).join("")}</select>
+          <input class="f-model" value="${esc(a.model)}" placeholder="model / command" title="model, or shell command with {{prompt}}">
+          <input type="checkbox" class="f-enabled" ${a.enabled?"checked":""} title="enabled">
+        </div>`).join("") || `<div class="empty">no agents</div>`}</div>`;
+  }).join("");
+
+  openModal(`<h3>Agents</h3><p class="sub">Adapters: demo (no model), ollama (local), hermes, opencode, shell (command in model field), echo.</p>
+    ${group}
+    <div class="agents-tbl" style="margin-top:6px"><button class="btn" id="save-agents">Save changes</button></div>
+    <div class="sec" style="margin-top:16px">Add agent</div>
+    <div class="row2">
+      <div class="field"><label>Slug</label><input id="na-slug" placeholder="builder"></div>
+      <div class="field"><label>Name</label><input id="na-name" placeholder="Builder"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>Division</label><select id="na-div">${s.divisions.map(d => `<option value="${esc(d.slug)}">${esc(d.name)}</option>`).join("")}</select></div>
+      <div class="field"><label>Role</label><select id="na-role"><option>worker</option><option>manager</option></select></div>
+    </div>
+    <div class="modal-actions"><button class="btn ghost" id="m-cancel">Close</button><button class="btn" id="na-create">Add agent</button></div>`);
+
+  $("#m-cancel").onclick = closeModal;
+  $("#save-agents").onclick = async () => {
+    const rows = [...$("#modal").querySelectorAll(".ag")];
+    try {
+      for (const r of rows) {
+        await api("/api/agents/" + r.dataset.slug, {method:"PATCH", body:{
+          adapter: r.querySelector(".f-adapter").value,
+          model: r.querySelector(".f-model").value,
+          enabled: r.querySelector(".f-enabled").checked,
+        }});
+      }
+      toast("agents saved"); closeModal(); load();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#na-create").onclick = async () => {
+    try {
+      await api("/api/agents", {method:"POST", body:{
+        slug:$("#na-slug").value.trim(), name:$("#na-name").value.trim() || $("#na-slug").value.trim(),
+        role:$("#na-role").value, division:$("#na-div").value, adapter:"demo"
+      }});
+      toast("agent added"); closeModal(); load();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+function addDivisionModal() {
+  openModal(`<h3>New division</h3><p class="sub">A division is a project with one manager and its workers.</p>
+    <div class="row2">
+      <div class="field"><label>Slug</label><input id="nd-slug" placeholder="mobile-app"></div>
+      <div class="field"><label>Name</label><input id="nd-name" placeholder="Mobile App"></div>
+    </div>
+    <div class="field"><label>Project path</label><input id="nd-path" placeholder="/home/you/Projects/..."></div>
+    <div class="field"><label>Charter</label><textarea id="nd-desc" placeholder="What this division owns, stack, conventions…"></textarea></div>
+    <div class="modal-actions"><button class="btn ghost" id="m-cancel">Cancel</button><button class="btn primary" id="nd-create">Create</button></div>`);
+  $("#m-cancel").onclick = closeModal;
+  $("#nd-create").onclick = async () => {
+    try {
+      await api("/api/divisions", {method:"POST", body:{
+        slug:$("#nd-slug").value.trim(), name:$("#nd-name").value.trim() || $("#nd-slug").value.trim(),
+        description:$("#nd-desc").value, project_path:$("#nd-path").value
+      }});
+      toast("division created"); closeModal(); load();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+function eventsModal() {
+  const ev = S.snap.events || [];
+  openModal(`<h3>Activity</h3><p class="sub">Last ${ev.length} events across the company.</p>
+    <div>${ev.map(e => `<div class="evt"><b>${esc(e.kind)}</b><span>${esc(e.ticket_ref || "")} ${esc(e.message)}</span><span class="t">${ago(e.created_at)}</span></div>`).join("") || `<div class="empty">no events</div>`}</div>
+    <div class="modal-actions"><button class="btn ghost" id="m-cancel">Close</button></div>`);
+  $("#m-cancel").onclick = closeModal;
+}
+
+/* ---------------- wiring ---------------- */
+$("#btn-new").onclick = newTicketModal;
+$("#btn-agents").onclick = agentsModal;
+$("#btn-add-div").onclick = addDivisionModal;
+$("#btn-events").onclick = eventsModal;
+$("#btn-refresh").onclick = () => { load(); toast("refreshed"); };
+$("#dr-close").onclick = closeDrawer;
+$("#backdrop").onclick = closeDrawer;
+$("#modal-wrap").onclick = (e) => { if (e.target.id === "modal-wrap") closeModal(); };
+$("#search").oninput = (e) => { S.q = e.target.value.toLowerCase().trim(); renderBoard(); };
+$("#btn-done").onclick = () => { S.showDone = !S.showDone; renderBoard(); };
+$("#btn-tick").onclick = async () => {
+  if (S.busy) return;
+  S.busy = true; $("#btn-tick").textContent = "dispatching…";
+  try {
+    const r = await api("/api/dispatch/tick", {method:"POST"});
+    toast(r.status === "busy" ? "a dispatch pass is already running" : "dispatch pass started");
+  } catch (e) { toast(e.message, true); }
+  setTimeout(async () => { S.busy = false; $("#btn-tick").textContent = "▶ Run dispatch tick"; await load(); }, 900);
+};
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { closeModal(); closeDrawer(); }
+  const typing = ["INPUT","TEXTAREA","SELECT"].includes(document.activeElement.tagName);
+  if (typing) return;
+  if (e.key === "n") { e.preventDefault(); newTicketModal(); }
+  if (e.key === "/") { e.preventDefault(); $("#search").focus(); }
+  if (e.key === "r") { load(); }
+});
+
+load();
+S.timer = setInterval(() => { if (!document.hidden) load(); }, 4000);
+</script>
+</body>
+</html>

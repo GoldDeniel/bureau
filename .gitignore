@@ -1,0 +1,8 @@
+target/
+bureau.db
+bureau.db-shm
+bureau.db-wal
+*.db
+*.db-shm
+*.db-wal
+.DS_Store

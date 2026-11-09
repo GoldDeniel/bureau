@@ -1,0 +1,17 @@
+[Unit]
+Description=Bureau — ticket system for a company of AI agents
+Documentation=file:///home/you/Projects/bureau/README.md
+RequiresMountsFor=/home/you
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/you/Projects/bureau
+ExecStart=/home/you/Projects/bureau/target/release/bureau serve --bind 127.0.0.1:8787 --interval 20
+Restart=on-failure
+RestartSec=5
+# Workers inherit this environment; keep credentials out of it.
+Environment=RUST_LOG=bureau=info
+
+[Install]
+WantedBy=default.target
