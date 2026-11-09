@@ -34,14 +34,23 @@ fn setup() -> (Router, Db) {
         db: db.clone(),
         dispatching: Arc::new(AtomicBool::new(false)),
         max_parallel: 4,
+        token: None,
     });
     (app, db)
 }
 
-async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(uri)
+async fn send_with(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    let mut req = Request::builder().method(method).uri(uri);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let req = req
         .header("content-type", "application/json")
         .body(
             body.map(|b| Body::from(b.to_string()))
@@ -58,6 +67,10 @@ async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (St
             .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into()))
     };
     (status, body)
+}
+
+async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+    send_with(app, method, uri, body, &[]).await
 }
 
 #[tokio::test]
@@ -86,7 +99,7 @@ async fn full_company_loop_over_http() {
     let (_, body) = send(&app, "GET", &format!("/api/tickets/{parent_ref}"), None).await;
     assert_eq!(body["ticket"]["status"], "triaged", "{body}");
     assert!(body["ticket"]["children"].as_array().unwrap().len() >= 2);
-    assert!(body["comments"].as_array().unwrap().len() >= 1);
+    assert!(!body["comments"].as_array().unwrap().is_empty());
 
     // Pass 2: workers execute the delegated tickets.
     let report = bureau::dispatch::tick(db.clone(), 4).await.unwrap();
@@ -144,6 +157,53 @@ async fn board_ui_is_served() {
     let html = String::from_utf8_lossy(&bytes);
     assert!(html.contains("Bureau"));
     assert!(html.contains("/api/state"));
+}
+
+#[tokio::test]
+async fn token_gate_protects_api_but_not_board_or_health() {
+    let (_, db) = setup();
+    let app = router(AppState {
+        db,
+        dispatching: Arc::new(AtomicBool::new(false)),
+        max_parallel: 4,
+        token: Some("s3cret".into()),
+    });
+
+    let (status, _) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, _) = send(&app, "GET", "/api/health", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let (status, body) = send_with(
+        &app,
+        "GET",
+        "/api/state",
+        None,
+        &[("x-bureau-token", "s3cret")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["divisions"][0]["slug"], "test");
+
+    let (status, _) = send(&app, "GET", "/api/state?token=s3cret", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send_with(
+        &app,
+        "GET",
+        "/api/state",
+        None,
+        &[("authorization", "Bearer wrong")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

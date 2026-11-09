@@ -1,0 +1,17 @@
+Package: bureau
+Version: @VERSION@
+Architecture: amd64
+Maintainer: Daniel <you@example.com>
+Installed-Size: @SIZE@
+Depends: libc6 (>= 2.39)
+Recommends: curl
+Section: utils
+Priority: optional
+Description: Ticket system for a company of AI agents
+ Bureau is a local ticket server with divisions, one manager agent per
+ division, and worker agents. Managers triage incoming tickets into
+ self-contained sub-tickets and workers execute them with a pluggable
+ adapter (Ollama, Hermes, OpenCode or a shell command).
+ .
+ It ships a single binary, an embedded web board, and a systemd template
+ unit: bureau@<user>.service.

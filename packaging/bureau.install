@@ -1,0 +1,29 @@
+post_install() {
+  if [ ! -e /etc/bureau/bureau.env ]; then
+    install -d -m 0755 /etc/bureau
+    TOKEN=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')
+    : > /etc/bureau/bureau.env
+    chmod 600 /etc/bureau/bureau.env
+    printf 'BUREAU_BIND=0.0.0.0:8787\nBUREAU_TOKEN=%s\n' "$TOKEN" >> /etc/bureau/bureau.env
+  fi
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  echo "Bureau installed. Start it for your user with:"
+  echo "  systemctl enable --now bureau@\$USER"
+  echo "Token and bind address: /etc/bureau/bureau.env"
+  echo "Then open: http://<this-host>:8787/?token=<token>"
+}
+
+post_upgrade() {
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+pre_remove() {
+  for unit in $(systemctl list-units --plain --no-legend 'bureau@*.service' 2>/dev/null | awk '{print $1}'); do
+    systemctl stop "$unit" >/dev/null 2>&1 || true
+  done
+}
+
+post_remove() {
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  echo "Ticket data kept in /var/lib/bureau/<user>/ — remove it manually if you want a clean slate."
+}

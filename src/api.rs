@@ -18,11 +18,14 @@ pub struct AppState {
     pub db: Db,
     pub dispatching: Arc<AtomicBool>,
     pub max_parallel: usize,
+    /// When set, every /api route except health requires this token.
+    pub token: Option<String>,
 }
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn router(state: AppState) -> Router {
+    let auth_state = state.clone();
     Router::new()
         .route("/", get(index))
         .route("/health", get(health))
@@ -40,7 +43,75 @@ pub fn router(state: AppState) -> Router {
         .route("/api/dispatch", get(dispatch_status))
         .route("/api/dispatch/tick", post(run_tick))
         .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))) })
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            require_token,
+        ))
         .with_state(state)
+}
+
+fn token_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn query_token(query: &str) -> Option<&str> {
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("token="))
+}
+
+fn cookie_token(cookie: &str) -> Option<&str> {
+    cookie
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("bureau_token="))
+}
+
+async fn require_token(
+    State(st): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(expected) = st.token.as_deref() else {
+        return next.run(req).await;
+    };
+    let path = req.uri().path();
+    // The board itself is public so it can ask for the token; health stays open for probes.
+    if matches!(path, "/" | "/health" | "/api/health") {
+        return next.run(req).await;
+    }
+    let header = req
+        .headers()
+        .get("x-bureau-token")
+        .and_then(|v| v.to_str().ok());
+    let bearer = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let cookie = req
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(cookie_token);
+    let query = req.uri().query().and_then(query_token);
+
+    if [header, bearer, cookie, query]
+        .into_iter()
+        .flatten()
+        .any(|t| token_eq(t, expected))
+    {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "a Bureau access token is required", "code": "token_required"})),
+        )
+            .into_response()
+    }
 }
 
 async fn index() -> Response {
@@ -406,10 +477,10 @@ async fn patch_ticket(
             db::set_status(&conn, ticket.id, "queued")?;
         }
     }
-    if let Some(note) = &p.note {
-        if !note.trim().is_empty() {
-            db::add_comment(&conn, ticket.id, "human", note)?;
-        }
+    if let Some(note) = &p.note
+        && !note.trim().is_empty()
+    {
+        db::add_comment(&conn, ticket.id, "human", note)?;
     }
     Ok(Json(
         json!({ "ticket": db::ticket_by_id(&conn, ticket.id)? }),

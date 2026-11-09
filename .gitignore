@@ -6,3 +6,7 @@ bureau.db-wal
 *.db-shm
 *.db-wal
 .DS_Store
+dist/
+packaging/.tools/
+packaging/src/
+packaging/pkg/

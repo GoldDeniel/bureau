@@ -93,16 +93,14 @@ fn collect_jobs(db: &Db) -> Result<Vec<Job>> {
         if let Some(agent) = db::agents(&conn, None)?
             .into_iter()
             .find(|a| a.id == agent_id)
+            && let Some(ticket) = db::queued_for_agent(&conn, agent_id)?
+            && let Some(division) = db::division_by_id(&conn, ticket.division_id)?
         {
-            if let Some(ticket) = db::queued_for_agent(&conn, agent_id)? {
-                if let Some(division) = db::division_by_id(&conn, ticket.division_id)? {
-                    jobs.push(Job::Worker {
-                        ticket,
-                        division,
-                        agent,
-                    });
-                }
-            }
+            jobs.push(Job::Worker {
+                ticket,
+                division,
+                agent,
+            });
         }
     }
     Ok(jobs)

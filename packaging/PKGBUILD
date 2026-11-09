@@ -1,0 +1,29 @@
+# Maintainer: Daniel <you@example.com>
+# Packages the prebuilt target/release/bureau (run packaging/build-all.sh).
+pkgname=bureau
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Ticket system for a company of AI agents"
+arch=('x86_64')
+license=('MIT')
+depends=('glibc' 'gcc-libs')
+optdepends=(
+  'curl: Ollama adapter'
+  'hermes-agent: Hermes adapter'
+  'opencode: OpenCode adapter'
+)
+install=bureau.install
+source=()
+sha256sums=()
+
+package() {
+  cd "$startdir/.."
+  install -Dm755 target/release/bureau "$pkgdir/usr/bin/bureau"
+  install -Dm644 packaging/bureau@.service \
+    "$pkgdir/usr/lib/systemd/system/bureau@.service"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/bureau/README.md"
+  install -Dm644 docs/AGENT-INTEGRATION.md \
+    "$pkgdir/usr/share/doc/bureau/AGENT-INTEGRATION.md"
+  install -Dm644 packaging/INSTALL.md "$pkgdir/usr/share/doc/bureau/INSTALL.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/bureau/LICENSE"
+}

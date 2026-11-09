@@ -303,16 +303,38 @@ const COLS = [
 
 const S = { snap:null, division:"all", q:"", openRef:null, openData:null, busy:false, timer:null, showDone:false };
 
-async function api(path, opts={}) {
+const tok = () => localStorage.getItem("bureau_token") || "";
+async function api(path, opts={}, retried=false) {
+  const headers = { "content-type": "application/json", ...(opts.headers || {}) };
+  if (tok()) headers["x-bureau-token"] = tok();
   const res = await fetch(path, {
-    headers: {"content-type":"application/json"},
     ...opts,
+    headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
+  if (res.status === 401) {
+    if (!retried) {
+      const entered = window.prompt("Bureau is protected by a token.\nPaste BUREAU_TOKEN (see /etc/bureau/bureau.env):");
+      if (entered && entered.trim()) {
+        localStorage.setItem("bureau_token", entered.trim());
+        return api(path, opts, true);
+      }
+    }
+    throw new Error("access token required");
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || (res.status + " " + res.statusText));
   return data;
 }
+// ?token=… in the URL bootstraps localStorage, then disappears from the address bar.
+(function bootstrapToken() {
+  const u = new URL(location.href);
+  const t = u.searchParams.get("token");
+  if (!t) return;
+  localStorage.setItem("bureau_token", t);
+  u.searchParams.delete("token");
+  history.replaceState({}, "", u.pathname + (u.search || "") + (u.hash || ""));
+})();
 function toast(msg, err=false) {
   const el = document.createElement("div");
   el.className = "toast" + (err ? " err" : "");

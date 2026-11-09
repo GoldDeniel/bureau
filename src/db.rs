@@ -95,10 +95,10 @@ CREATE INDEX IF NOT EXISTS events_recent ON events(id DESC);
 "#;
 
 pub fn open(path: &str) -> Result<Db> {
-    if let Some(dir) = Path::new(path).parent() {
-        if !dir.as_os_str().is_empty() {
-            std::fs::create_dir_all(dir).ok();
-        }
+    if let Some(dir) = Path::new(path).parent()
+        && !dir.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(dir).ok();
     }
     let conn = Connection::open(path).with_context(|| format!("opening {path}"))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -406,7 +406,7 @@ pub fn agents(conn: &Connection, division_id: Option<i64>) -> Result<Vec<Agent>>
 
 pub fn agent_by_slug(conn: &Connection, slug: &str) -> Result<Option<Agent>> {
     let sql = format!("{AGENT_SELECT} WHERE a.slug = ?1");
-    Ok(conn.query_row(&sql, [slug], |r| map_agent(r)).optional()?)
+    Ok(conn.query_row(&sql, [slug], map_agent).optional()?)
 }
 
 pub fn workers_for(conn: &Connection, division_id: i64) -> Result<Vec<Agent>> {
@@ -415,18 +415,17 @@ pub fn workers_for(conn: &Connection, division_id: i64) -> Result<Vec<Agent>> {
     );
     let mut stmt = conn.prepare(&sql)?;
     let out = stmt
-        .query_map([division_id], |r| map_agent(r))?
+        .query_map([division_id], map_agent)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(out)
 }
 
 pub fn manager_for(conn: &Connection, division_id: i64) -> Result<Option<Agent>> {
     let sql = format!("{AGENT_SELECT} WHERE a.division_id = ?1 AND a.role = 'manager'");
-    Ok(conn
-        .query_row(&sql, [division_id], |r| map_agent(r))
-        .optional()?)
+    Ok(conn.query_row(&sql, [division_id], map_agent).optional()?)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_agent(
     conn: &Connection,
     slug: &str,
@@ -507,6 +506,7 @@ pub fn try_start_agent(conn: &Connection, id: i64) -> Result<bool> {
 
 // ---------------------------------------------------------------- tickets
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_ticket(
     conn: &Connection,
     division_id: i64,

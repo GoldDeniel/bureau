@@ -135,10 +135,10 @@ async fn run_cmd(
             "BUREAU_DIVISION",
             agent.division_slug.clone().unwrap_or_default(),
         );
-    if let Some(dir) = cwd {
-        if !dir.is_empty() {
-            cmd.current_dir(dir);
-        }
+    if let Some(dir) = cwd
+        && !dir.is_empty()
+    {
+        cmd.current_dir(dir);
     }
     let mut child = cmd
         .spawn()

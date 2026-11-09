@@ -47,6 +47,45 @@ directly and it skips triage.
 
 ---
 
+## Install (deb / rpm / Arch)
+
+Ready-made packages are in `dist/`, built by `packaging/build-all.sh`:
+
+```bash
+# Arch / CachyOS
+sudo pacman -U bureau-0.2.0-1-x86_64.pkg.tar.zst
+
+# Debian / Ubuntu
+sudo apt install ./bureau_0.2.0_amd64.deb
+
+# Fedora / RHEL
+sudo dnf install ./bureau-0.2.0-1.x86_64.rpm
+
+# then, once
+sudo systemctl enable --now bureau@$USER
+```
+
+The unit is a template — the instance name is the user that owns the project
+folders, so agents can write there. First start seeds the company into
+`/var/lib/bureau/<user>/bureau.db`.
+
+The installer writes `/etc/bureau/bureau.env` with `BUREAU_BIND=0.0.0.0:8787`
+and a random `BUREAU_TOKEN`. Open the board once with
+`http://<host>:8787/?token=<token>`; the browser keeps the token.
+
+| file | purpose |
+|---|---|
+| `/usr/bin/bureau` | the binary |
+| `/usr/lib/systemd/system/bureau@.service` | system service template |
+| `/etc/bureau/bureau.env` | bind address + token (created on install) |
+| `/var/lib/bureau/<user>/bureau.db` | tickets |
+
+Full per-distro notes, firewall commands and uninstall steps:
+[`packaging/INSTALL.md`](packaging/INSTALL.md).
+
+---
+
+
 ## The model
 
 **Divisions** are projects. Each has a slug, a name, a project path and a
@@ -147,7 +186,7 @@ Beads alongside it — Bureau tickets can reference `bd` IDs in their bodies.
 Terminal / scripts: `scripts/smoke.sh` runs the whole loop on a throwaway database.
 Agent integration details: `docs/AGENT-INTEGRATION.md`.
 
-## Run it as a user service
+## Run it as a user service (no root)
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -158,7 +197,9 @@ systemctl --user enable --now bureau
 
 ## Safety notes
 
-- Binds to `127.0.0.1` by default. There is no auth: do not expose it.
+- Binds to `127.0.0.1` by default (`--bind`, or `BUREAU_BIND`). The packaged
+  service binds `0.0.0.0` **and** generates a token; if you set
+  `BUREAU_TOKEN=` empty, the board and API are open to your LAN.
 - Adapters run real commands with your user's permissions. `hermes` without
   `--yolo` and `opencode` without `--auto` are safer; the seeded agents use
   `demo` for exactly this reason.

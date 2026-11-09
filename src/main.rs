@@ -28,7 +28,7 @@ enum Cmd {
     Init,
     /// Run the HTTP server + board UI (and the dispatcher loop).
     Serve {
-        #[arg(long, default_value = "127.0.0.1:8787")]
+        #[arg(long, env = "BUREAU_BIND", default_value = "127.0.0.1:8787")]
         bind: String,
         #[arg(long)]
         seed: bool,
@@ -193,10 +193,15 @@ async fn main() -> Result<()> {
                 seed::seed(&db)?;
             }
             let flag = Arc::new(AtomicBool::new(false));
+            let token = std::env::var("BUREAU_TOKEN")
+                .ok()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty());
             let state = api::AppState {
                 db: db.clone(),
                 dispatching: flag.clone(),
                 max_parallel,
+                token,
             };
 
             if !no_dispatch {
@@ -246,9 +251,14 @@ async fn main() -> Result<()> {
             let actual = listener.local_addr()?;
             println!("Bureau v{}  →  http://{actual}", api::VERSION);
             println!(
-                "database: {}   dispatcher: {}",
+                "database: {}   dispatcher: {}   auth: {}",
                 cli.db,
-                if no_dispatch { "off" } else { "on" }
+                if no_dispatch { "off" } else { "on" },
+                if state.token.is_some() {
+                    "token required"
+                } else {
+                    "open (no token)"
+                }
             );
             axum::serve(listener, api::router(state)).await?;
         }
@@ -341,7 +351,7 @@ async fn main() -> Result<()> {
                         println!("(no tickets)");
                     } else {
                         println!(
-                            "{:<8} {:<3} {:<12} {:<16} {:<8} {}",
+                            "{:<8} {:<3} {:<12} {:<16} {:<8} {:<20}",
                             "REF", "P", "STATUS", "DIVISION", "AGENT", "TITLE"
                         );
                         for t in list {
@@ -445,7 +455,7 @@ async fn main() -> Result<()> {
                         None => None,
                     };
                     println!(
-                        "{:<10} {:<8} {:<14} {:<10} {:<24} {:<8} {}",
+                        "{:<10} {:<8} {:<14} {:<10} {:<24} {:<8} {:<8}",
                         "SLUG", "ROLE", "DIVISION", "ADAPTER", "MODEL", "ENABLED", "STATUS"
                     );
                     for a in db::agents(&conn, division_id)? {

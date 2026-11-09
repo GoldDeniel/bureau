@@ -101,6 +101,13 @@ vanilla-JS board. `cargo test`, then `cargo run -- serve`. Improve the product y
     },
 ];
 
+pub fn projects_root() -> String {
+    std::env::var("BUREAU_PROJECTS_ROOT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| PROJECTS_ROOT.to_string())
+}
+
 pub fn seed(db: &Db) -> Result<Vec<String>> {
     let conn = db.lock().unwrap();
     let existing: Vec<String> = db::divisions(&conn)?.into_iter().map(|d| d.slug).collect();
@@ -110,7 +117,7 @@ pub fn seed(db: &Db) -> Result<Vec<String>> {
         let div_id = if existing.iter().any(|s| s == spec.slug) {
             db::division_by_slug(&conn, spec.slug)?.unwrap().id
         } else {
-            let path = format!("{PROJECTS_ROOT}/{}", spec.repo);
+            let path = format!("{}/{}", projects_root(), spec.repo);
             let id = db::create_division(&conn, spec.slug, spec.name, spec.charter, &path)?;
             created.push(spec.slug.to_string());
             id

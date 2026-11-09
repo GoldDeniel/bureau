@@ -1,0 +1,25 @@
+[Unit]
+Description=Bureau agent ticket server (%i)
+Documentation=file:///usr/share/doc/bureau/README.md
+After=network-online.target remote-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Instance name is the Linux user that owns the projects: bureau@<user>
+User=%i
+StateDirectory=bureau/%i
+WorkingDirectory=/var/lib/bureau/%i
+Environment=BUREAU_BIND=127.0.0.1:8787
+EnvironmentFile=-/etc/bureau/bureau.env
+# First start seeds the company; later starts reuse the database.
+ExecStartPre=/bin/sh -c '[ -f bureau.db ] || /usr/bin/bureau init'
+ExecStart=/usr/bin/bureau serve --bind ${BUREAU_BIND} --interval 20
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+TimeoutStopSec=20
+SyslogIdentifier=bureau
+
+[Install]
+WantedBy=multi-user.target
