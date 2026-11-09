@@ -53,13 +53,13 @@ Ready-made packages are in `dist/`, built by `packaging/build-all.sh`:
 
 ```bash
 # Arch / CachyOS
-sudo pacman -U bureau-0.2.0-1-x86_64.pkg.tar.zst
+sudo pacman -U bureau-0.2.1-1-x86_64.pkg.tar.zst
 
 # Debian / Ubuntu
-sudo apt install ./bureau_0.2.0_amd64.deb
+sudo apt install ./bureau_0.2.1_amd64.deb
 
 # Fedora / RHEL
-sudo dnf install ./bureau-0.2.0-1.x86_64.rpm
+sudo dnf install ./bureau-0.2.1-1.x86_64.rpm
 
 # then, once
 sudo systemctl enable --now bureau@$USER

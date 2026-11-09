@@ -68,6 +68,9 @@ pub async fn tick(db: Db, max_parallel: usize) -> Result<TickReport> {
 
 fn collect_jobs(db: &Db) -> Result<Vec<Job>> {
     let conn = db.lock().unwrap();
+    // Self-heal: a queued ticket assigned to a manager would never be picked
+    // up by either loop, so hand it back to triage instead of stranding it.
+    db::requeue_manager_assignments(&conn)?;
     let mut jobs = Vec::new();
 
     for division in db::divisions(&conn)? {

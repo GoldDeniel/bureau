@@ -115,6 +115,52 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r#"'"'"'"#))
 }
 
+/// Resolve an adapter binary even when the service PATH is minimal.
+///
+/// A systemd unit does not inherit the login shell PATH, and CLIs installed by
+/// their own installers (Hermes) live under `~/.hermes/installs/*/venv/bin`.
+/// Look there as a fallback so services and CLI runs behave the same.
+fn resolve_bin(name: &str) -> String {
+    if name.contains('/') {
+        return name.to_string();
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(':').filter(|d| !d.is_empty()) {
+            let candidate = std::path::Path::new(dir).join(name);
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let installs = std::path::PathBuf::from(home).join(".hermes/installs");
+        if let Ok(entries) = std::fs::read_dir(installs) {
+            let mut found: Vec<std::path::PathBuf> = Vec::new();
+            for entry in entries.flatten() {
+                let envs = entry.path().join("environments");
+                if let Ok(envs) = std::fs::read_dir(envs) {
+                    for env in envs.flatten() {
+                        let candidate = env.path().join("venv/bin").join(name);
+                        if candidate.is_file() {
+                            found.push(candidate);
+                        }
+                    }
+                }
+            }
+            found.sort_by_key(|p| {
+                std::fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .map(std::cmp::Reverse)
+            });
+            if let Some(p) = found.into_iter().next() {
+                return p.to_string_lossy().into_owned();
+            }
+        }
+    }
+    name.to_string()
+}
+
 async fn run_cmd(
     bin: &str,
     args: &[String],
@@ -123,7 +169,7 @@ async fn run_cmd(
     ctx: &JobCtx,
     agent: &Agent,
 ) -> Result<String> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = Command::new(resolve_bin(bin));
     cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

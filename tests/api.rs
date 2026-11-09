@@ -207,6 +207,69 @@ async fn token_gate_protects_api_but_not_board_or_health() {
 }
 
 #[tokio::test]
+async fn manager_assignments_go_back_to_triage() {
+    let (app, db) = setup();
+
+    // Creating a ticket "for" a manager means: this manager triages it.
+    let (_, body) = send(
+        &app,
+        "POST",
+        "/api/tickets",
+        Some(json!({"title": "manager owns this", "division": "test", "assignee": "mgr"})),
+    )
+    .await;
+    assert_eq!(body["ticket"]["status"], "new", "{body}");
+    assert!(body["ticket"]["assignee_id"].is_null(), "{body}");
+
+    // A worker assignment still queues directly.
+    let (_, body) = send(
+        &app,
+        "POST",
+        "/api/tickets",
+        Some(json!({"title": "worker owns this", "division": "test", "assignee": "w1"})),
+    )
+    .await;
+    assert_eq!(body["ticket"]["status"], "queued", "{body}");
+    let r = body["ticket"]["ref"].as_str().unwrap().to_string();
+
+    // Reassigning to a manager (what the board's drawer does) sends it to triage.
+    let (_, body) = send(
+        &app,
+        "PATCH",
+        &format!("/api/tickets/{r}"),
+        Some(json!({"assignee": "mgr"})),
+    )
+    .await;
+    assert_eq!(body["ticket"]["status"], "new", "{body}");
+    assert!(body["ticket"]["assignee_id"].is_null(), "{body}");
+
+    // Legacy rows stuck in `queued` with a manager are repaired by the loop.
+    {
+        let conn = db.lock().unwrap();
+        let manager = db::agent_by_slug(&conn, "mgr").unwrap().unwrap();
+        let division = db::division_by_slug(&conn, "test").unwrap().unwrap();
+        let legacy = db::create_ticket(
+            &conn,
+            division.id,
+            None,
+            "legacy stuck row",
+            "",
+            2,
+            Some(manager.id),
+            "human",
+            "queued",
+        )
+        .unwrap();
+        assert_eq!(db::requeue_manager_assignments(&conn).unwrap(), 1);
+        let after = db::ticket_by_id(&conn, legacy.id)
+            .unwrap()
+            .expect("legacy ticket exists");
+        assert!(after.assignee_id.is_none(), "assignee should be cleared");
+        assert_eq!(after.status, "new", "should be back in triage");
+    }
+}
+
+#[tokio::test]
 async fn invalid_status_is_rejected() {
     let (app, _db) = setup();
     let (_, body) = send(

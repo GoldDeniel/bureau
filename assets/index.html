@@ -556,7 +556,7 @@ function newTicketModal() {
   const s = S.snap;
   const divs = s.divisions;
   const cur = S.division === "all" ? divs[0] : divs.find(d => d.slug === S.division);
-  openModal(`<h3>New ticket</h3><p class="sub">No assignee means the division manager triages it.</p>
+  openModal(`<h3>New ticket</h3><p class="sub">Leave it unassigned — or pick a manager — and that division's manager triages it.</p>
     <div class="field"><label>Title</label><input id="nt-title" placeholder="What needs to happen?" autofocus></div>
     <div class="field"><label>Description</label><textarea id="nt-body" placeholder="Context, constraints, acceptance criteria…"></textarea></div>
     <div class="row2">

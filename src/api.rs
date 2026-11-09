@@ -367,13 +367,19 @@ async fn create_ticket(
     let conn = st.db.lock().unwrap();
     let division = db::division_by_slug(&conn, &body.division)?
         .ok_or_else(|| anyhow::anyhow!("division {} not found", body.division))?;
-    let assignee = match &body.assignee {
-        Some(slug) if !slug.is_empty() => Some(
-            db::agent_by_slug(&conn, slug)?
-                .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?
-                .id,
-        ),
-        _ => None,
+    let (assignee, handed_to) = match &body.assignee {
+        Some(slug) if !slug.is_empty() => {
+            let agent = db::agent_by_slug(&conn, slug)?
+                .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+            if agent.role == "manager" {
+                // A manager is a triager, not a worker: assigning to one means
+                // "let this manager break it down", so keep it unassigned.
+                (None, Some(agent.slug))
+            } else {
+                (Some(agent.id), None)
+            }
+        }
+        _ => (None, None),
     };
     let parent_id = match &body.parent {
         Some(p) if !p.is_empty() => Some(ticket_or_404!(conn, p.clone()).id),
@@ -402,6 +408,15 @@ async fn create_ticket(
             ticket.ref_
         ),
     )?;
+    if let Some(manager) = &handed_to {
+        db::add_event(
+            &conn,
+            "assign",
+            Some(ticket.id),
+            None,
+            &format!("{} handed to manager {} for triage", ticket.ref_, manager),
+        )?;
+    }
     if let Some(p) = parent_id {
         db::rollup_parent(&conn, ticket.id).ok();
         let _ = p;
@@ -463,19 +478,7 @@ async fn patch_ticket(
         db::set_title_body(&conn, ticket.id, &ticket.title, body)?;
     }
     if let Some(assignee) = &p.assignee {
-        let agent_id = if assignee.is_empty() {
-            None
-        } else {
-            Some(
-                db::agent_by_slug(&conn, assignee)?
-                    .ok_or_else(|| anyhow::anyhow!("agent {} not found", assignee))?
-                    .id,
-            )
-        };
-        db::set_assignee(&conn, ticket.id, agent_id)?;
-        if agent_id.is_some() && matches!(ticket.status.as_str(), "new" | "triaged") {
-            db::set_status(&conn, ticket.id, "queued")?;
-        }
+        assign_to(&conn, &ticket, assignee)?;
     }
     if let Some(note) = &p.note
         && !note.trim().is_empty()
@@ -519,6 +522,60 @@ async fn add_comment(
     })))
 }
 
+/// One place for "who owns this ticket" rules.
+///
+/// Workers execute, managers only triage. Assigning a manager therefore means
+/// "send it back to triage" (managers only see tickets with no assignee), and
+/// clearing the assignee does the same for anything not started yet.
+fn assign_to(conn: &rusqlite::Connection, ticket: &db::Ticket, slug: &str) -> anyhow::Result<()> {
+    let slug = slug.trim();
+    if slug.is_empty() {
+        db::set_assignee(conn, ticket.id, None)?;
+        if matches!(ticket.status.as_str(), "new" | "triaged" | "queued") {
+            db::set_status(conn, ticket.id, "new")?;
+        }
+        db::add_event(
+            conn,
+            "assign",
+            Some(ticket.id),
+            None,
+            &format!("{} unassigned → triage", ticket.ref_),
+        )?;
+        return Ok(());
+    }
+    let agent = db::agent_by_slug(conn, slug)?
+        .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    if agent.role == "manager" {
+        db::set_assignee(conn, ticket.id, None)?;
+        if matches!(ticket.status.as_str(), "new" | "triaged" | "queued") {
+            db::set_status(conn, ticket.id, "new")?;
+        }
+        db::add_event(
+            conn,
+            "assign",
+            Some(ticket.id),
+            Some(agent.id),
+            &format!(
+                "{} handed to manager {} for triage",
+                ticket.ref_, agent.slug
+            ),
+        )?;
+    } else {
+        db::set_assignee(conn, ticket.id, Some(agent.id))?;
+        if matches!(ticket.status.as_str(), "new" | "triaged") {
+            db::set_status(conn, ticket.id, "queued")?;
+        }
+        db::add_event(
+            conn,
+            "assign",
+            Some(ticket.id),
+            Some(agent.id),
+            &format!("{} assigned to {}", ticket.ref_, agent.slug),
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct AssignBody {
     agent: String,
@@ -531,19 +588,7 @@ async fn assign_ticket(
 ) -> Result<Json<Value>, ApiError> {
     let conn = st.db.lock().unwrap();
     let ticket = ticket_or_404!(conn, key);
-    let agent = db::agent_by_slug(&conn, &a.agent)?
-        .ok_or_else(|| anyhow::anyhow!("agent {} not found", a.agent))?;
-    db::set_assignee(&conn, ticket.id, Some(agent.id))?;
-    if matches!(ticket.status.as_str(), "new" | "triaged") {
-        db::set_status(&conn, ticket.id, "queued")?;
-    }
-    db::add_event(
-        &conn,
-        "assign",
-        Some(ticket.id),
-        Some(agent.id),
-        &format!("{} assigned to {}", ticket.ref_, agent.slug),
-    )?;
+    assign_to(&conn, &ticket, &a.agent)?;
     Ok(Json(
         json!({ "ticket": db::ticket_by_id(&conn, ticket.id)? }),
     ))
