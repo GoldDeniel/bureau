@@ -167,6 +167,7 @@
   }
   .meta-grid select:focus{border-color:#3a4a72}
   .body-txt{white-space:pre-wrap;font-size:12.5px;color:#c9cfdd;background:#12151d;border:1px solid var(--line);border-radius:10px;padding:11px 12px;max-height:280px;overflow:auto}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em;background:#1b2130;border:1px solid #2a3246;border-radius:4px;padding:0 4px;color:#c7d4ff}
   .sec{font-size:10.5px;letter-spacing:.11em;text-transform:uppercase;color:var(--dim);margin:2px 0 -6px}
   .result{border-left:2px solid var(--acc);background:#131a2a;padding:10px 12px;border-radius:0 8px 8px 0;font-size:12px;white-space:pre-wrap;color:#dbe3ff;max-height:260px;overflow:auto}
   .kids{display:flex;flex-direction:column;gap:5px}
@@ -280,6 +281,8 @@
 "use strict";
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+// escaped text + inline `code` spans, for bodies/agent output
+const rich = (s) => esc(s).replace(/`([^`\n]+)`/g, "<code>$1</code>");
 const ago = (iso) => {
   if (!iso) return "";
   const t = Date.parse(iso); if (isNaN(t)) return iso;
@@ -462,7 +465,7 @@ function renderDrawer() {
     </div>`).join("");
   const comments = d.comments.map(c => `
     <div class="cm"><div class="h"><span class="who">${esc(c.author)}</span><span>${ago(c.created_at)}</span></div>
-    <div class="b">${esc(c.body)}</div></div>`).join("");
+    <div class="b">${rich(c.body)}</div></div>`).join("");
 
   const actions = [
     t.status !== "done" ? `<button class="btn small" data-act="done">✓ Approve / done</button>` : `<button class="btn small" data-act="review">↺ Reopen</button>`,
@@ -483,8 +486,8 @@ function renderDrawer() {
         ${agents.map(a => `<option value="${esc(a.slug)}" ${a.slug===t.assignee_slug?"selected":""}>${esc(a.slug)} (${esc(a.role)})</option>`).join("")}
       </select>
     </div>
-    ${t.body ? `<div class="sec">Description</div><div class="body-txt">${esc(t.body)}</div>` : ""}
-    ${t.result ? `<div class="sec">Result</div><div class="result">${esc(t.result)}</div>` : ""}
+    ${t.body ? `<div class="sec">Description</div><div class="body-txt">${rich(t.body)}</div>` : ""}
+    ${t.result ? `<div class="sec">Result</div><div class="result">${rich(t.result)}</div>` : ""}
     ${kids ? `<div class="sec">Sub-tickets (${t.children.length})</div><div class="kids">${kids}</div>` : ""}
     <div class="sec">Timeline</div>
     <div class="timeline">${comments || `<div class="empty">no comments yet</div>`}</div>
