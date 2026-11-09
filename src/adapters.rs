@@ -22,22 +22,18 @@ pub struct JobCtx {
     pub ticket_title: String,
 }
 
-const MAX_OUTPUT: usize = 8000;
+/// Hard cap for agent output kept in the database. Managers answer with a JSON
+/// plan, so the *head* must survive: truncating the tail (or the head) destroys
+/// the JSON and the ticket gets marked "not valid JSON".
+const MAX_OUTPUT: usize = 262_144;
 
-fn tail(s: &str) -> String {
+fn trim_output(s: &str) -> String {
     let s = s.trim();
     if s.chars().count() <= MAX_OUTPUT {
         return s.to_string();
     }
-    let cut: String = s
-        .chars()
-        .rev()
-        .take(MAX_OUTPUT)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("…(truncated)\n{cut}")
+    let head: String = s.chars().take(MAX_OUTPUT).collect();
+    format!("{head}\n…(truncated)")
 }
 
 pub async fn run_agent(agent: &Agent, prompt: &str, ctx: &JobCtx) -> Result<String> {
@@ -202,7 +198,7 @@ async fn run_cmd(
         bail!(
             "'{bin}' exited {}: {}",
             out.status.code().unwrap_or(-1),
-            tail(&format!("{stdout}\n{stderr}"))
+            trim_output(&format!("{stdout}\n{stderr}"))
         );
     }
     let text = if stdout.trim().is_empty() {
@@ -210,7 +206,7 @@ async fn run_cmd(
     } else {
         stdout
     };
-    Ok(tail(&text))
+    Ok(trim_output(&text))
 }
 
 async fn ollama(agent: &Agent, prompt: &str, _ctx: &JobCtx) -> Result<String> {
@@ -267,16 +263,21 @@ async fn ollama(agent: &Agent, prompt: &str, _ctx: &JobCtx) -> Result<String> {
     if !out.status.success() {
         bail!("curl failed: {}", String::from_utf8_lossy(&out.stderr));
     }
-    let v: serde_json::Value =
-        serde_json::from_str(&raw).with_context(|| format!("ollama said: {}", tail(&raw)))?;
+    let v: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("ollama said: {}", trim_output(&raw)))?;
     if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
         bail!("ollama error: {err}");
     }
     let content = v
         .pointer("/message/content")
         .and_then(|c| c.as_str())
-        .ok_or_else(|| anyhow!("ollama response had no message.content: {}", tail(&raw)))?;
-    Ok(tail(content))
+        .ok_or_else(|| {
+            anyhow!(
+                "ollama response had no message.content: {}",
+                trim_output(&raw)
+            )
+        })?;
+    Ok(trim_output(content))
 }
 
 /// Deterministic adapter used for demos and tests: no model, no tokens, full loop.
@@ -347,6 +348,20 @@ mod tests {
             status: "idle".into(),
             created_at: String::new(),
         }
+    }
+
+    #[test]
+    fn long_output_keeps_the_head() {
+        let raw = format!(
+            "{{\"action\":\"answer\",\"body\":\"{}\"}}",
+            "x".repeat(300_000)
+        );
+        let out = trim_output(&raw);
+        assert!(
+            out.starts_with("{\"action\":\"answer\""),
+            "head must survive"
+        );
+        assert!(out.ends_with("…(truncated)"));
     }
 
     #[tokio::test]

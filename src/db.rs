@@ -635,13 +635,14 @@ pub fn tickets(
 /// and only tickets with `assignee_id IS NULL` reach them. Put such tickets
 /// back into the triage queue instead of leaving them stuck in `queued`.
 pub fn requeue_manager_assignments(conn: &Connection) -> Result<usize> {
-    let n = conn.execute(
+    conn.execute(
         "UPDATE tickets SET assignee_id = NULL, status = 'new', updated_at = ?1
-         WHERE status IN ('new', 'queued')
-           AND assignee_id IN (SELECT id FROM agents WHERE role = 'manager')",
+         WHERE (status = 'queued' AND assignee_id IS NULL)
+            OR (status IN ('new','queued')
+                AND assignee_id IN (SELECT id FROM agents WHERE role = 'manager'))",
         [now()],
     )?;
-    Ok(n)
+    Ok(conn.changes() as usize)
 }
 
 pub fn set_status(conn: &Connection, id: i64, status: &str) -> Result<()> {

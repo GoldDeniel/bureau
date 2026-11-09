@@ -411,12 +411,35 @@ fn extract_json(raw: &str) -> Option<&str> {
         .unwrap_or(raw);
     let raw = raw.trim_end_matches("```").trim();
     let start = raw.find('{')?;
-    let end = raw.rfind('}')?;
-    if end > start {
-        Some(&raw[start..=end])
-    } else {
-        None
+    // Return the first *balanced* object: plans contain nested objects, and
+    // models sometimes trail prose after the JSON.
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (i, &b) in raw.as_bytes().iter().enumerate().skip(start) {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&raw[start..=i]);
+                }
+            }
+            _ => {}
+        }
     }
+    None
 }
 
 async fn apply_plan(
@@ -593,6 +616,15 @@ mod tests {
             extract_json(raw).unwrap(),
             "{\"action\":\"blocked\",\"reason\":\"x\"}"
         );
+    }
+
+    #[test]
+    fn extracts_json_with_nested_objects_and_trailing_prose() {
+        let raw = "Here you go:\n{\"action\":\"delegate\",\"summary\":\"x\",\"subtasks\":[{\"title\":\"a\",\"body\":\"b\",\"priority\":2,\"agent\":\"w\"}]}\nHope that helps!";
+        let j = extract_json(raw).unwrap();
+        let v: serde_json::Value = serde_json::from_str(j).unwrap();
+        assert_eq!(v["action"], "delegate");
+        assert_eq!(v["subtasks"][0]["agent"], "w");
     }
 
     #[test]

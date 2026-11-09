@@ -6,20 +6,20 @@ database is created on first start under `/var/lib/bureau/<user>/`.
 ## Arch / CachyOS
 
 ```bash
-sudo pacman -U bureau-0.2.1-1-x86_64.pkg.tar.zst
+sudo pacman -U bureau-0.2.2-1-x86_64.pkg.tar.zst
 ```
 
 ## Debian / Ubuntu
 
 ```bash
-sudo apt install ./bureau_0.2.1_amd64.deb     # resolves libc6 automatically
-# or: sudo dpkg -i bureau_0.2.1_amd64.deb && sudo apt -f install
+sudo apt install ./bureau_0.2.2_amd64.deb     # resolves libc6 automatically
+# or: sudo dpkg -i bureau_0.2.2_amd64.deb && sudo apt -f install
 ```
 
 ## Fedora / RHEL
 
 ```bash
-sudo dnf install ./bureau-0.2.1-1.x86_64.rpm
+sudo dnf install ./bureau-0.2.2-1.x86_64.rpm
 ```
 
 ## Start it
