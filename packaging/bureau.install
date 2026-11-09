@@ -8,7 +8,7 @@ post_install() {
   fi
   systemctl daemon-reload >/dev/null 2>&1 || true
   echo "Bureau installed. Start it for your user with:"
-  echo "  systemctl enable --now bureau@\$USER"
+  echo "  systemctl enable --now bureau@<your-user>"
   echo "Token and bind address: /etc/bureau/bureau.env"
   echo "Then open: http://<this-host>:8787/?token=<token>"
 }
