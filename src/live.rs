@@ -62,7 +62,9 @@ pub fn matching_under(all: &[Proc], root: i32, needle: &str) -> Vec<Proc> {
     let descendants = descendants_of(all, root);
     let mut chosen: HashSet<i32> = all
         .iter()
-        .filter(|p| descendants.contains(&p.pid) && p.cmd.contains(needle))
+        .filter(|p| {
+            descendants.contains(&p.pid) && (p.cmd.contains(needle) || env_has(p.pid, needle))
+        })
         .map(|p| p.pid)
         .collect();
     if chosen.is_empty() {
@@ -86,6 +88,16 @@ pub fn matching_under(all: &[Proc], root: i32, needle: &str) -> Vec<Proc> {
         .collect();
     out.sort_by_key(|p| p.pid);
     out
+}
+
+/// True when the process carries `BUREAU_TICKET=<needle>` in its environment.
+/// Adapters that do not put the ticket ref on the command line (a bare shell
+/// loop) are still identified correctly this way.
+fn env_has(pid: i32, needle: &str) -> bool {
+    let want = format!("BUREAU_TICKET={needle}");
+    std::fs::read(format!("/proc/{pid}/environ"))
+        .map(|raw| raw.split(|b| *b == 0).any(|kv| kv == want.as_bytes()))
+        .unwrap_or(false)
 }
 
 /// Every pid below `root` (children, grandchildren, …), not including root.

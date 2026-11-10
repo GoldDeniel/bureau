@@ -138,6 +138,7 @@ async fn run_job(db: Db, job: Job) -> Result<()> {
                 project_path: division.project_path.clone(),
                 ticket_ref: ticket.ref_.clone(),
                 ticket_title: ticket.title.clone(),
+                log_path: log_file(&db, &ticket.ref_),
             };
             let result = adapters::run_agent(&manager, &prompt, &ctx).await;
 
@@ -190,6 +191,7 @@ async fn run_job(db: Db, job: Job) -> Result<()> {
                 project_path: division.project_path.clone(),
                 ticket_ref: ticket.ref_.clone(),
                 ticket_title: ticket.title.clone(),
+                log_path: log_file(&db, &ticket.ref_),
             };
             let result = adapters::run_agent(&agent, &prompt, &ctx).await;
 
@@ -234,6 +236,23 @@ async fn fail_ticket(db: &Db, ticket: &Ticket, message: &str) -> Result<()> {
     db::set_status(&conn, ticket.id, status)?;
     db::add_event(&conn, "error", Some(ticket.id), None, message)?;
     Ok(())
+}
+
+/// Job log path next to the database: `<db dir>/logs/<ref>.log`.
+/// The board tails this file while the agent runs.
+fn log_file(db: &Db, ticket_ref: &str) -> String {
+    let conn = db.lock().unwrap();
+    conn.path()
+        .map(|p| {
+            std::path::Path::new(p)
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("logs")
+                .join(format!("{ticket_ref}.log"))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------- prompts

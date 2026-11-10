@@ -38,6 +38,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tickets", get(list_tickets).post(create_ticket))
         .route("/api/tickets/{key}", get(get_ticket).patch(patch_ticket))
         .route("/api/tickets/{key}/comment", post(add_comment))
+        .route("/api/tickets/{key}/log", get(ticket_log))
         .route("/api/tickets/{key}/assign", post(assign_ticket))
         .route("/api/tickets/{key}/claim", post(claim_ticket))
         .route("/api/events", get(list_events))
@@ -661,6 +662,50 @@ async fn claim_ticket(
 #[derive(Deserialize)]
 struct EventQuery {
     limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct LogQuery {
+    #[serde(default)]
+    lines: Option<usize>,
+}
+
+/// Tail of the agent's stdout/stderr for this ticket — the "chat window".
+async fn ticket_log(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Query(q): Query<LogQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let (ref_, status, path) = {
+        let conn = st.db.lock().unwrap();
+        let t = ticket_or_404!(conn, key);
+        let dir = conn
+            .path()
+            .map(|p| {
+                std::path::Path::new(p)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf()
+            })
+            .unwrap_or_default();
+        let path = dir.join("logs").join(format!("{}.log", t.ref_));
+        (t.ref_.clone(), t.status.clone(), path)
+    };
+    let bytes = std::fs::read(&path).unwrap_or_default();
+    let start = bytes.len().saturating_sub(256 * 1024);
+    let text = String::from_utf8_lossy(&bytes[start..]);
+    let want = q.lines.unwrap_or(400).clamp(10, 4000);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if lines.len() > want {
+        lines = lines.split_off(lines.len() - want);
+    }
+    Ok(Json(json!({
+        "ref": ref_,
+        "status": status,
+        "exists": path.exists(),
+        "bytes": bytes.len(),
+        "lines": lines,
+    })))
 }
 
 async fn list_events(

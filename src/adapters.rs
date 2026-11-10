@@ -20,6 +20,8 @@ pub struct JobCtx {
     pub project_path: String,
     pub ticket_ref: String,
     pub ticket_title: String,
+    /// Where to mirror the agent's stdout/stderr while it runs ("" = no file).
+    pub log_path: String,
 }
 
 /// Hard cap for agent output kept in the database. Managers answer with a JSON
@@ -170,6 +172,7 @@ async fn run_cmd(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .env("BUREAU_TICKET", &ctx.ticket_ref)
         .env("BUREAU_TITLE", &ctx.ticket_title)
         .env("BUREAU_AGENT", &agent.slug)
@@ -191,13 +194,43 @@ async fn run_cmd(
         let _ = stdin.write_all(prompt.as_bytes()).await;
         drop(stdin);
     }
-    let out = child.wait_with_output().await?;
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    if !out.status.success() {
+    let out_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let err_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    if !ctx.log_path.is_empty() {
+        if let Some(dir) = std::path::Path::new(&ctx.log_path).parent() {
+            let _ = tokio::fs::create_dir_all(dir).await;
+        }
+        let _ = tokio::fs::write(
+            &ctx.log_path,
+            format!(
+                "== {} · {} · {} ==\n",
+                ctx.ticket_ref, agent.slug, agent.adapter
+            ),
+        )
+        .await;
+    }
+    let mut h_out = child
+        .stdout
+        .take()
+        .map(|s| tokio::spawn(tee(s, ctx.log_path.clone(), out_buf.clone(), "»")));
+    let mut h_err = child
+        .stderr
+        .take()
+        .map(|s| tokio::spawn(tee(s, ctx.log_path.clone(), err_buf.clone(), "!")));
+
+    let status = child.wait().await?;
+    if let Some(h) = h_out.take() {
+        let _ = h.await;
+    }
+    if let Some(h) = h_err.take() {
+        let _ = h.await;
+    }
+    let stdout = out_buf.lock().unwrap().clone();
+    let stderr = err_buf.lock().unwrap().clone();
+    if !status.success() {
         bail!(
             "'{bin}' exited {}: {}",
-            out.status.code().unwrap_or(-1),
+            status.code().unwrap_or(-1),
             trim_output(&format!("{stdout}\n{stderr}"))
         );
     }
@@ -207,6 +240,45 @@ async fn run_cmd(
         stdout
     };
     Ok(trim_output(&text))
+}
+
+/// Mirror one stream to the job log and to an in-memory buffer.
+///
+/// Line-buffered on purpose: the log is what the board shows live, so partial
+/// lines must not sit in a pipe buffer until the agent finishes.
+async fn tee<R>(
+    reader: R,
+    path: String,
+    sink: std::sync::Arc<std::sync::Mutex<String>>,
+    tag: &'static str,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let mut lines = BufReader::new(reader).lines();
+    let mut file = match tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .await
+    {
+        Ok(f) if !path.is_empty() => Some(f),
+        _ => None,
+    };
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(f) = file.as_mut() {
+            let stamp = chrono::Local::now().format("%H:%M:%S");
+            let _ = f
+                .write_all(format!("{stamp} {tag} {line}\n").as_bytes())
+                .await;
+            let _ = f.flush().await;
+        }
+        let mut buf = sink.lock().unwrap();
+        if buf.len() < MAX_OUTPUT {
+            buf.push_str(&line);
+            buf.push('\n');
+        }
+    }
 }
 
 async fn ollama(agent: &Agent, prompt: &str, _ctx: &JobCtx) -> Result<String> {
@@ -372,6 +444,7 @@ mod tests {
             project_path: "/tmp".into(),
             ticket_ref: "BUR-1".into(),
             ticket_title: "Add grass".into(),
+            log_path: String::new(),
         };
         let out = run_agent(&agent("demo"), "prompt", &ctx).await.unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
