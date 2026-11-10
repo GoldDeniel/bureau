@@ -101,6 +101,23 @@
   .topbar h1{margin:0;font-size:17px;font-weight:650;letter-spacing:.1px}
   .topbar p{margin:2px 0 0;color:var(--mut);font-size:11.5px}
   .top-actions{margin-left:auto;display:flex;align-items:center;gap:8px}
+
+  /* ---------- live strip ---------- */
+  .livebar{display:flex;align-items:center;gap:8px;padding:7px 22px;border-bottom:1px solid var(--line);background:#0f121a;flex-wrap:wrap;min-height:38px}
+  .livebar .lab{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+  .live-chip{display:flex;align-items:center;gap:7px;background:#141926;border:1px solid #232b3d;border-radius:20px;padding:3px 10px 3px 8px;font-size:11.5px;color:var(--txt);cursor:pointer;font:inherit}
+  .live-chip:hover{border-color:#33405c;background:#172033}
+  .live-chip .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse 1.2s infinite}
+  .live-chip .ag{font-family:ui-monospace,monospace;color:#a9b6d6}
+  .live-chip .ref{color:#dbe4ff;font-family:ui-monospace,monospace}
+  .live-chip .t{color:var(--dim);font-variant-numeric:tabular-nums}
+  .live-chip .n{font-size:10px;color:var(--mut);background:#1b2130;border:1px solid #28324a;border-radius:20px;padding:0 6px}
+  .live-idle{font-size:11.5px;color:var(--dim)}
+  .live-procs{display:flex;flex-direction:column;gap:6px;margin:10px 0;max-height:320px;overflow:auto}
+  .live-proc{display:grid;grid-template-columns:52px 52px 1fr;gap:8px;align-items:baseline;font-size:11px;background:#12151d;border:1px solid var(--line);border-radius:7px;padding:5px 8px}
+  .live-proc .pid{color:var(--dim);font-family:ui-monospace,monospace}
+  .live-proc .secs{color:var(--mut);font-variant-numeric:tabular-nums}
+  .live-proc code{font-size:10.5px;color:#c7d2e8;white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,monospace}
   .search{
     display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line);
     border-radius:9px;padding:0 9px;height:32px;width:210px;
@@ -258,6 +275,7 @@
         <button class="btn" id="btn-refresh" title="Refresh">↻</button>
       </div>
     </div>
+    <div class="livebar" id="livebar"></div>
     <div class="board" id="board"></div>
   </main>
 </div>
@@ -393,6 +411,7 @@ function renderRail() {
       ? `<div class="agent-row" style="color:#5d6579">+${agents.length - shown.length} more · <button class="btn ghost small" id="btn-more-agents" style="padding:0 4px">manage</button></div>`
       : "") || `<div class="empty">no agents</div>`;
   const more = $("#btn-more-agents"); if (more) more.onclick = agentsModal;
+  renderLive(s.live || []);
 }
 
 function visibleTickets() {
@@ -546,6 +565,49 @@ function renderDrawer() {
 }
 
 /* ---------------- modals ---------------- */
+function fmtDur(secs) {
+  if (!isFinite(secs) || secs < 0) secs = 0;
+  const h = Math.floor(secs / 3600), m = Math.floor(secs / 60) % 60, s = Math.floor(secs % 60);
+  if (h) return `${h}h${String(m).padStart(2, "0")}m`;
+  if (m) return `${m}m${String(s).padStart(2, "0")}s`;
+  return `${s}s`;
+}
+
+function renderLive(live) {
+  const el = $("#livebar"); if (!el) return;
+  if (!live.length) {
+    el.innerHTML = `<span class="lab">Live</span><span class="live-idle">no agent running — waiting for work</span>`;
+    return;
+  }
+  el.innerHTML = `<span class="lab">Live</span>` + live.map((l, i) => {
+    const secs = (Date.now() - new Date(l.started_at)) / 1000;
+    const n = (l.procs || []).length;
+    return `<button class="live-chip" data-i="${i}" title="${esc(l.title || "")}">
+      <span class="dot"></span><span class="ag">${esc(l.agent || "?")}</span>
+      <span class="ref">${esc(l.ref)}</span><span class="t">${fmtDur(secs)}</span>
+      ${n ? `<span class="n">${n} proc${n > 1 ? "s" : ""}</span>` : ""}
+    </button>`;
+  }).join("");
+  el.querySelectorAll(".live-chip").forEach(b => {
+    b.onclick = () => liveModal(live[+b.dataset.i]);
+  });
+}
+
+function liveModal(l) {
+  const secs = (Date.now() - new Date(l.started_at)) / 1000;
+  const rows = (l.procs || []).map(p => `<div class="live-proc">
+      <span class="pid">${p.pid}</span><span class="secs">${fmtDur(p.secs)}</span>
+      <code>${esc(p.cmd)}</code></div>`).join("")
+    || `<div class="empty">no matching processes right now</div>`;
+  openModal(`<h3>${esc(l.agent || "?")} → ${esc(l.ref)}</h3>
+    <p class="sub">${esc(l.title || "")} · running ${fmtDur(secs)} · ${esc(l.role || "worker")}</p>
+    <div class="live-procs">${rows}</div>
+    <p class="sub">Live process tree under the Bureau server — subagents show up as children of the agent CLI.</p>
+    <div class="modal-actions"><button class="btn" id="lm-open">Open ${esc(l.ref)}</button><button class="btn ghost" id="lm-close">Close</button></div>`);
+  $("#lm-open").onclick = () => { closeModal(); openTicket(l.ref); };
+  $("#lm-close").onclick = closeModal;
+}
+
 function openModal(html) {
   $("#modal").innerHTML = html;
   $("#modal-wrap").classList.add("show");

@@ -1,6 +1,7 @@
 //! HTTP API + the single-page board UI.
 use crate::db::{self, AgentPatch, Db, STATUSES};
 use crate::dispatch;
+use crate::live;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -191,12 +192,39 @@ async fn snapshot(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
         needs_review: tickets.iter().filter(|t| t.status == "review").count() as i64,
         running: agents.iter().filter(|a| a.status == "running").count() as i64,
     };
+    // What is actually running right now: the agent CLIs we spawned, plus any
+    // subagents/helpers they spawned themselves.
+    let procs = live::processes();
+    let running: Vec<Value> = tickets
+        .iter()
+        .filter(|t| t.status == "in_progress")
+        .map(|t| {
+            let kids = live::matching_under(&procs, std::process::id() as i32, &t.ref_);
+            let role = agents
+                .iter()
+                .find(|a| Some(&a.slug) == t.assignee_slug.as_ref())
+                .map(|a| a.role.clone())
+                .unwrap_or_else(|| "worker".to_string());
+            json!({
+                "id": t.id,
+                "ref": t.ref_,
+                "title": t.title,
+                "agent": t.assignee_slug.clone(),
+                "role": role,
+                "started_at": t.updated_at,
+                "procs": kids,
+            })
+        })
+        .collect();
+
     Ok(Json(json!({
         "version": VERSION,
+        "pid": std::process::id(),
         "divisions": divisions,
         "agents": agents,
         "tickets": tickets,
         "events": events,
+        "live": running,
         "stats": stats,
         "statuses": STATUSES,
         "adapters": ["demo", "ollama", "hermes", "opencode", "shell", "echo"],

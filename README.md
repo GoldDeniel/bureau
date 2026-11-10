@@ -53,13 +53,13 @@ Ready-made packages are in `dist/`, built by `packaging/build-all.sh`:
 
 ```bash
 # Arch / CachyOS
-sudo pacman -U bureau-0.2.2-1-x86_64.pkg.tar.zst
+sudo pacman -U bureau-0.3.0-1-x86_64.pkg.tar.zst
 
 # Debian / Ubuntu
-sudo apt install ./bureau_0.2.2_amd64.deb
+sudo apt install ./bureau_0.3.0_amd64.deb
 
 # Fedora / RHEL
-sudo dnf install ./bureau-0.2.2-1.x86_64.rpm
+sudo dnf install ./bureau-0.3.0-1.x86_64.rpm
 
 # then, once
 sudo systemctl enable --now bureau@$USER
@@ -123,6 +123,17 @@ Managers only ever see tickets. They never see each other's output, so every
 sub-ticket prompt carries its own context.
 
 ---
+
+## Watching agents work
+
+The board's **Live** strip sits right under the header. Each running job is a
+chip: agent slug, ticket ref, elapsed time and a process count. Click it to see
+the real process tree — the agent CLI plus every subagent/helper it spawned
+(`opencode run`, `godot --headless`, …), with pid and runtime.
+
+The list is built from `ps` restricted to the server's own process tree, so a
+shell or watcher that merely mentions a ticket ref never shows up as an agent.
+`GET /api/state` returns the same data under `live`.
 
 ## CLI
 
