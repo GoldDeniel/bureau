@@ -299,7 +299,7 @@ async fn main() -> Result<()> {
                     json,
                 } => {
                     let div = db::division_by_slug(&conn, &division)?
-                        .with_context(|| format!("division '{division}' not found"))?;
+                        .with_context(|| no_division(&division, &cli.db))?;
                     let assignee = match agent {
                         Some(slug) => Some(
                             db::agent_by_slug(&conn, &slug)?
@@ -339,7 +339,7 @@ async fn main() -> Result<()> {
                     let division_id = match division {
                         Some(slug) => Some(
                             db::division_by_slug(&conn, &slug)?
-                                .with_context(|| format!("division '{slug}' not found"))?
+                                .with_context(|| no_division(&slug, &cli.db))?
                                 .id,
                         ),
                         None => None,
@@ -449,7 +449,7 @@ async fn main() -> Result<()> {
                     let division_id = match division {
                         Some(slug) => Some(
                             db::division_by_slug(&conn, &slug)?
-                                .with_context(|| format!("division '{slug}' not found"))?
+                                .with_context(|| no_division(&slug, &cli.db))?
                                 .id,
                         ),
                         None => None,
@@ -481,7 +481,7 @@ async fn main() -> Result<()> {
                     hint,
                 } => {
                     let div = db::division_by_slug(&conn, &division)?
-                        .with_context(|| format!("division '{division}' not found"))?;
+                        .with_context(|| no_division(&division, &cli.db))?;
                     db::create_agent(
                         &conn,
                         &slug,
@@ -543,9 +543,9 @@ async fn main() -> Result<()> {
         }
         Cmd::Division { cmd } => {
             let db = db::open(&cli.db)?;
-            let conn = db.lock().unwrap();
             match cmd {
                 DivisionCmd::List => {
+                    // describe() takes the lock itself: do not hold it here or this deadlocks.
                     print!("{}", seed::describe(&db)?);
                 }
                 DivisionCmd::Add {
@@ -554,6 +554,7 @@ async fn main() -> Result<()> {
                     description,
                     path,
                 } => {
+                    let conn = db.lock().unwrap();
                     let id = db::create_division(&conn, &slug, &name, &description, &path)?;
                     println!("created division {slug} (#{id})");
                 }
@@ -561,6 +562,15 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Explain a missing division instead of only naming it: the usual cause is
+/// pointing the CLI at a database that was never seeded.
+fn no_division(slug: &str, db_path: &str) -> String {
+    format!(
+        "no division '{slug}' in {db_path} — a fresh database has none; run `bureau seed` \
+         to create the defaults, or pass --db / set BUREAU_DB to the server's database"
+    )
 }
 
 fn ellipsis(s: &str, n: usize) -> String {
