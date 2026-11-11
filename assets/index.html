@@ -577,6 +577,12 @@ const setHash = (ref, push) => {
   if (push) history.pushState(null, "", url); else history.replaceState(null, "", url);
 };
 async function openTicket(ref, opts = {}) {
+  // A ref absent from the last snapshot is stale: drop it instead of firing a 404.
+  if (!opts.fresh && S.snap && !S.snap.tickets.some(t => t.ref === ref)) {
+    closeDrawer({ silent: true });
+    setHash(null, false);
+    return;
+  }
   S.openRef = ref;
   S.openData = null; S.openJson = null; S.logPin = null;
   $("#backdrop").classList.add("show");
@@ -825,7 +831,7 @@ function newTicketModal() {
         title, body:$("#nt-body").value, division:$("#nt-div").value,
         priority:+$("#nt-prio").value, assignee:$("#nt-agent").value || null
       }});
-      closeModal(); toast(`created ${r.ticket.ref}`); load(); openTicket(r.ticket.ref);
+      closeModal(); toast(`created ${r.ticket.ref}`); load(); openTicket(r.ticket.ref, { fresh: true });
     } catch (e) { toast(e.message, true); }
   };
   $("#nt-title").onkeydown = (e) => { if (e.key === "Enter" && (e.metaKey||e.ctrlKey)) $("#m-create").click(); };
