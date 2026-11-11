@@ -463,10 +463,19 @@ function toast(msg, err=false) {
 async function load() {
   try {
     const snap = await api("/api/state");
-    const key = JSON.stringify(snap);
+    // `live` carries process elapsed seconds and the event feed grows constantly;
+    // keying the board off them would repaint every 4s and lose scroll. Sign only
+    // what the rail/board actually draw.
+    const key = JSON.stringify([snap.version, snap.divisions, snap.agents, snap.tickets, snap.stats, snap.dispatching]);
     const changed = key !== S.snapJson;
     S.snap = snap; S.snapJson = key;
-    if (changed) { renderRail(); renderBoard(); renderFoot(); }
+    if (changed) {
+      const sx = scrollX, sy = scrollY;
+      renderRail(); renderBoard(); renderFoot();
+      scrollTo(sx, sy);
+    } else {
+      renderLive(snap.live || []);   // chips and timers stay live without a full repaint
+    }
     if (S.openRef) refreshDrawer(true);
   } catch (e) {
     $("#foot-stats").textContent = "offline";
@@ -675,9 +684,12 @@ function renderDrawer(keep) {
   const draft = $("#dr-comment");
   const draftVal = draft ? draft.value : "";
   const draftTop = draft ? draft.scrollTop : 0;
-  const bodyTop = keep ? $("#dr-body").scrollTop : Math.max(0, +drScroll[t.ref] || 0);
+  const bodyEl = $("#dr-body");
+  const bodyTop = keep ? bodyEl.scrollTop : Math.max(0, +drScroll[t.ref] || 0);
+  const bodyHeight = keep ? bodyEl.scrollHeight : 0;
   const log = $("#dr-log");
   const logTop = keep && log ? log.scrollTop : 0;
+  const logText = log ? log.textContent : "";
   const logAtBottom = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 48;
   S.logPin = keep && !logAtBottom ? { ref: t.ref, top: logTop } : null;
   $("#dr-ref").textContent = `${t.ref} · ${t.division_slug} · opened by ${t.created_by} · ${ago(t.created_at)}`;
@@ -718,7 +730,7 @@ function renderDrawer(keep) {
     ${t.body ? `<div class="sec-row"><div class="sec">Description</div><button class="expand" data-focus="desc" title="Open full size">⤢</button></div><div class="body-txt" id="dr-desc">${rich(t.body)}</div>` : ""}
     ${t.result ? `<div class="sec-row"><div class="sec">Result</div><button class="expand" data-focus="result" title="Open full size">⤢</button></div><div class="result" id="dr-result">${rich(t.result)}</div>` : ""}
     <div class="sec-row"><div class="sec">Agent output <span class="hint">· live terminal</span></div><button class="expand" data-focus="log" title="Open full size">⤢</button></div>
-    <pre class="term" id="dr-log">loading…</pre>
+    <pre class="term" id="dr-log">${logText ? esc(logText) : "loading…"}</pre>
     ${kids ? `<div class="sec">Sub-tickets (${t.children.length})</div><div class="kids">${kids}</div>` : ""}
     <div class="sec">Timeline</div>
     <div class="timeline">${comments || `<div class="empty">no comments yet</div>`}</div>
@@ -731,11 +743,20 @@ function renderDrawer(keep) {
       </div>
     </div>`;
 
-  $("#dr-body").scrollTop = bodyTop;
+  const body = $("#dr-body");
+  // A ticket that just lost most of its content (body cleared, comments pruned)
+  // must not be forced to an offset past the new end.
+  if (!bodyHeight || body.scrollHeight >= bodyHeight * 0.5) body.scrollTop = bodyTop;
+  const newLog = $("#dr-log");
+  if (newLog) {
+    if (S.logPin) newLog.scrollTop = S.logPin.top;                       // hold the reader's place
+    else if (keep && logAtBottom) newLog.scrollTop = newLog.scrollHeight; // still follow the tail
+  }
   const cm = $("#dr-comment");
   if (cm && keep) { cm.value = draftVal; cm.scrollTop = draftTop; }
-  if (caret && cm) { cm.focus(); cm.setSelectionRange(caret[0], caret[1]); }
-  else if (actId) { const el = document.getElementById(actId); if (el) el.focus(); }
+  // preventScroll: focusing the composer must not scroll #dr-body away from the restored position
+  if (caret && cm) { cm.focus({ preventScroll: true }); cm.setSelectionRange(caret[0], caret[1]); }
+  else if (actId) { const el = document.getElementById(actId); if (el) el.focus({ preventScroll: true }); }
 
   $("#dr-close").onclick = closeDrawer;
   $("#backdrop").onclick = closeDrawer;

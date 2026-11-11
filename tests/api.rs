@@ -172,6 +172,11 @@ async fn board_ui_keeps_persistence_and_poll_contracts() {
         "bureau_dr_scroll",       // drawer read position
         "S.snapJson",             // board poll short-circuit
         "S.openJson === json",    // drawer poll short-circuit
+        "scrollTo(sx, sy)",        // page scroll survives a board repaint
+        "renderLive(snap.live || [])", // live chips still tick on an unchanged poll
+        "bodyHeight * 0.5",        // drawer scroll restore guarded against content loss
+        "newLog.scrollTop = S.logPin.top", // agent log keeps its place
+        "cm.value = draftVal",     // half-typed comment survives a poll
         "data-focus",             // full-size description/log overlay
         "popstate",               // back/forward
         ".call(history",          // unbound pushState/replaceState throws "Illegal invocation"
