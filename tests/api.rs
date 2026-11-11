@@ -155,6 +155,31 @@ async fn board_ui_is_served() {
     assert!(html.contains("/api/state"));
 }
 
+/// Static contracts for the board state/scroll work. These are cheap guards:
+/// if a refactor drops the short-circuits or the URL/localStorage keys, the
+/// browser behaviour silently regresses and only a real F5 would show it.
+#[tokio::test]
+async fn board_ui_keeps_persistence_and_poll_contracts() {
+    let (app, _db) = setup();
+    let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&bytes);
+    for needle in [
+        "bureau_view",            // division / done toggle / search
+        "bureau_board",           // board + column scroll
+        "bureau_dr_scroll",       // drawer read position
+        "S.snapJson",             // board poll short-circuit
+        "S.openJson === json",    // drawer poll short-circuit
+        "data-focus",             // full-size description/log overlay
+        "popstate",               // back/forward
+        ".call(history",          // unbound pushState/replaceState throws "Illegal invocation"
+    ] {
+        assert!(html.contains(needle), "board is missing `{needle}`");
+    }
+}
+
 #[tokio::test]
 async fn token_gate_protects_api_but_not_board_or_health() {
     let (_, db) = setup();

@@ -617,7 +617,8 @@ function writeStateToUrl(push = false, force = false) {
   // built from pathname + search only: bootstrapToken() already stripped ?token, so it never leaks
   const url = location.pathname + location.search + hash;
   if (url === location.pathname + location.search + location.hash) { saveView(); return; }
-  (push ? history.pushState : history.replaceState)({ bureau: 1 }, "", url);
+  // call on history itself: a detached pushState reference throws "Illegal invocation"
+  (push ? history.pushState : history.replaceState).call(history, { bureau: 1 }, "", url);
   saveView();
 }
 async function openTicket(ref, opts = {}) {
