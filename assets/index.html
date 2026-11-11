@@ -139,6 +139,7 @@
   .col-head .n{font-size:10.5px;color:var(--dim);margin-left:auto;background:#171b26;border-radius:20px;padding:0 6px}
   .col.new .col-head .t{color:#9db4ff}
   .col.review .col-head .t{color:#fcd34d}
+  .col-head .n.sub{color:#94a3b8;font-size:11px;margin-left:4px}
   .col.done .col-head .t{color:#6ee7a0}
   .col.attention .col-head .t{color:#fca5a5}
   .cards{padding:8px;display:flex;flex-direction:column;gap:7px;overflow-y:auto;min-height:40px;flex:1}
@@ -406,6 +407,18 @@ $("#board").addEventListener("scroll", () => {
 }, true);
 addEventListener("beforeunload", persistBoard);
 
+// drawer read position, per ticket ref, so F5 in the middle of a description resumes there
+const DR_SCROLL_KEY = "bureau_dr_scroll";
+const drScroll = (() => { try { return JSON.parse(localStorage.getItem(DR_SCROLL_KEY) || "{}"); } catch { return {}; } })();
+let drScrollSave = null;
+const persistDrScroll = () => { try { localStorage.setItem(DR_SCROLL_KEY, JSON.stringify(drScroll)); } catch {} };
+$("#dr-body").addEventListener("scroll", () => {
+  if (!S.openRef || !S.openData) return;
+  drScroll[S.openRef] = $("#dr-body").scrollTop;
+  clearTimeout(drScrollSave); drScrollSave = setTimeout(persistDrScroll, 250);
+}, true);
+addEventListener("beforeunload", persistDrScroll);
+
 const tok = () => localStorage.getItem("bureau_token") || "";
 async function api(path, opts={}, retried=false) {
   const headers = { "content-type": "application/json", ...(opts.headers || {}) };
@@ -478,7 +491,7 @@ function renderRail() {
       <span class="cnt ${n?"hot":""}">${n}</span></button>`;
   });
   $("#divs").innerHTML = html;
-  $("#divs").querySelectorAll("[data-div]").forEach(b => b.onclick = () => { S.division = b.dataset.div; saveView(); renderRail(); renderBoard(); });
+  $("#divs").querySelectorAll("[data-div]").forEach(b => b.onclick = () => { S.division = b.dataset.div; renderRail(); renderBoard(); writeStateToUrl(false); });
 
   const cur = s.divisions.find(d => d.slug === S.division);
   $("#ttl").textContent = cur ? cur.name : "All divisions";
@@ -545,11 +558,21 @@ function renderBoard() {
       if (cs) boardScroll.cols[c.dataset.col] = cs.scrollTop;
     });
   }
+  // A sub-ticket whose parent is itself waiting for review is not a separate
+  // decision: the parent is. Hide it there so one feature reads as one card.
+  const byRef = new Map(ts.map(t => [t.ref, t]));
+  const absorbedByParent = t => {
+    const p = t.parent_ref ? byRef.get(t.parent_ref) : null;
+    return !!p && (p.status === "review" || p.status === "done");
+  };
   board.innerHTML = cols.map(col => {
-    const items = ts.filter(t => col.st.includes(t.status))
+    const all = ts.filter(t => col.st.includes(t.status));
+    const hidden = col.id === "review" ? all.filter(absorbedByParent).length : 0;
+    const items = (col.id === "review" ? all.filter(t => !absorbedByParent(t)) : all)
       .sort((a,b) => a.priority - b.priority || a.id - b.id);
+    const sub = hidden ? ` <span class="n sub" title="sub-tickets of a parent that is already in review">+${hidden} sub</span>` : "";
     return `<section class="col ${col.id}" data-col="${col.id}">
-      <div class="col-head"><span class="t">${col.label}</span><span class="n">${items.length}</span></div>
+      <div class="col-head"><span class="t">${col.label}</span><span class="n">${items.length}</span>${sub}</div>
       <div class="cards">${items.length ? items.map(card).join("") : `<div class="empty">nothing here</div>`}</div>
     </section>`;
   }).join("");
@@ -567,20 +590,42 @@ function renderFoot() {
   $("#foot-dispatch").textContent = s.dispatching ? "dispatching…" : (s.stats.running ? `${s.stats.running} running` : "idle");
 }
 
-/* ---------------- drawer ---------------- */
-const hashRef = () => {
-  const m = location.hash.match(/^#\/t\/([^/?#]+)/);
-  return m ? decodeURIComponent(m[1]) : null;
+/* ---------------- url state ---------------- */
+// #/t/<REF>?div=<slug>&done=1 — the whole view, so a reload or a shared link lands in place.
+const hashState = () => {
+  const raw = location.hash.replace(/^#/, "");
+  const qi = raw.indexOf("?");
+  const params = new URLSearchParams(qi >= 0 ? raw.slice(qi + 1) : "");
+  const m = raw.match(/^\/?t\/([^/?#]+)/);
+  return { ref: m ? decodeURIComponent(m[1]) : null, div: params.get("div"), done: params.get("done") };
 };
-const setHash = (ref, push) => {
-  const url = location.pathname + location.search + (ref ? "#/t/" + encodeURIComponent(ref) : "");
-  if (push) history.pushState(null, "", url); else history.replaceState(null, "", url);
-};
+// Boot only: a hash wins over the localStorage copy, but a missing param keeps the saved filter.
+function readStateFromUrl() {
+  const st = hashState();
+  if (st.div) S.division = st.div;
+  if (st.done !== null) S.showDone = st.done === "1";
+  if (st.ref) S.openRef = st.ref;
+}
+let applyingUrl = false;   // true while reacting to back/forward, so we never push a nested entry
+function writeStateToUrl(push = false, force = false) {
+  if (applyingUrl && !force) return;
+  const params = new URLSearchParams();
+  if (S.division && S.division !== "all") params.set("div", S.division);
+  if (S.showDone) params.set("done", "1");
+  const qs = params.toString();
+  const hash = (S.openRef ? "#/t/" + encodeURIComponent(S.openRef) : "") + (qs ? (S.openRef ? "?" : "#/?") + qs : "");
+  // built from pathname + search only: bootstrapToken() already stripped ?token, so it never leaks
+  const url = location.pathname + location.search + hash;
+  if (url === location.pathname + location.search + location.hash) { saveView(); return; }
+  (push ? history.pushState : history.replaceState)({ bureau: 1 }, "", url);
+  saveView();
+}
 async function openTicket(ref, opts = {}) {
   // A ref absent from the last snapshot is stale: drop it instead of firing a 404.
   if (!opts.fresh && S.snap && !S.snap.tickets.some(t => t.ref === ref)) {
+    toast(ref + " is no longer on the board", true);
     closeDrawer({ silent: true });
-    setHash(null, false);
+    writeStateToUrl(false, true);
     return;
   }
   S.openRef = ref;
@@ -588,21 +633,23 @@ async function openTicket(ref, opts = {}) {
   $("#backdrop").classList.add("show");
   $("#drawer").classList.add("show");
   $("#dr-body").innerHTML = `<div class="empty">loading…</div>`;
-  if (!opts.silent) setHash(ref, true);
+  if (!opts.silent) writeStateToUrl(true);
   const ok = await refreshDrawer(!!opts.restore);
   if (S.openRef !== ref) return;
   if (ok) return;
   // a ref that no longer exists must not leave a dead drawer or a stale hash behind
   closeDrawer({ silent: true });
-  setHash(null, false);
+  writeStateToUrl(false, true);
 }
 function closeDrawer(opts = {}) {
   S.openRef = null; S.openData = null; S.openJson = null; S.logPin = null;
   clearInterval(S.logTimer); S.logTimer = null;
   $("#backdrop").classList.remove("show");
   $("#drawer").classList.remove("show");
-  if (!opts.silent && hashRef()) setHash(null, false);
+  if (!opts.silent) writeStateToUrl(false);
 }
+
+/* ---------------- drawer ---------------- */
 async function refreshDrawer(soft) {
   if (!S.openRef) return false;
   const ref = S.openRef;
@@ -627,7 +674,7 @@ function renderDrawer(keep) {
   const draft = $("#dr-comment");
   const draftVal = draft ? draft.value : "";
   const draftTop = draft ? draft.scrollTop : 0;
-  const bodyTop = keep ? $("#dr-body").scrollTop : 0;
+  const bodyTop = keep ? $("#dr-body").scrollTop : Math.max(0, +drScroll[t.ref] || 0);
   const log = $("#dr-log");
   const logTop = keep && log ? log.scrollTop : 0;
   const logAtBottom = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 48;
@@ -997,7 +1044,7 @@ $("#grip").addEventListener("dblclick", () => {
 addEventListener("resize", () => setDrawerWidth(drawerEl.getBoundingClientRect().width));
 
 $("#search").oninput = (e) => { S.q = e.target.value.toLowerCase().trim(); saveView(); renderBoard(); };
-$("#btn-done").onclick = () => { S.showDone = !S.showDone; saveView(); renderBoard(); };
+$("#btn-done").onclick = () => { S.showDone = !S.showDone; renderBoard(); writeStateToUrl(false); };
 $("#btn-tick").onclick = async () => {
   if (S.busy) return;
   S.busy = true; $("#btn-tick").textContent = "dispatching…";
@@ -1016,19 +1063,38 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "r") { load(); }
 });
 
-load().then(() => {
+// Back/forward (and a hand-edited hash): mirror the URL into the board without writing it back.
+async function applyUrlState() {
+  if (applyingUrl) return;
+  applyingUrl = true;
+  try {
+    const st = hashState();
+    const div = st.div || "all";
+    const done = st.done === "1";
+    const rail = div !== S.division;
+    const board = rail || done !== S.showDone;
+    if (rail) S.division = div;
+    S.showDone = done;
+    if (rail) renderRail();
+    if (board) renderBoard();
+    if (st.ref && st.ref !== S.openRef) await openTicket(st.ref, { silent: true, restore: true });
+    else if (!st.ref && S.openRef) closeDrawer({ silent: true });
+    saveView();
+  } finally { applyingUrl = false; }
+}
+addEventListener("popstate", applyUrlState);
+addEventListener("hashchange", applyUrlState);
+
+readStateFromUrl();
+load().then(async () => {
   if (S.snap && S.division !== "all" && !S.snap.divisions.some(d => d.slug === S.division)) {
-    S.division = "all"; saveView(); renderRail(); renderBoard();
+    S.division = "all"; renderRail(); renderBoard();
   }
-  const r = hashRef();
-  if (r) openTicket(r, { silent: true, restore: true });
+  const ref = S.openRef;
+  if (ref) await openTicket(ref, { silent: true, restore: true });
+  writeStateToUrl(false, true);   // normalise the address bar (and drop a ref that just 404'd)
 });
 S.timer = setInterval(() => { if (!document.hidden) load(); }, 4000);
-addEventListener("hashchange", () => {
-  const r = hashRef();
-  if (r && r !== S.openRef) openTicket(r, { silent: true });
-  else if (!r && S.openRef) closeDrawer({ silent: true });
-});
 </script>
 </body>
 </html>

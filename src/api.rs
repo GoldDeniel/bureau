@@ -494,6 +494,20 @@ async fn patch_ticket(
             &format!("{} → {}", ticket.ref_, status),
         )?;
         if status == "done" {
+            // one decision closes the whole subtree: children are not separate reviews
+            let closed = db::close_subtickets(&conn, ticket.id)?;
+            if !closed.is_empty() {
+                db::add_comment(
+                    &conn,
+                    ticket.id,
+                    "bureau",
+                    &format!(
+                        "Accepted; {} sub-ticket(s) closed with it: {}",
+                        closed.len(),
+                        closed.join(", ")
+                    ),
+                )?;
+            }
             db::rollup_parent(&conn, ticket.id)?;
         }
     }

@@ -422,6 +422,13 @@ async fn main() -> Result<()> {
                     db::set_status(&conn, t.id, &status)?;
                     db::add_event(&conn, "status", Some(t.id), None, &format!("→ {status}"))?;
                     println!("{} → {}", t.ref_, status);
+                    if status == "done" {
+                        let closed = db::close_subtickets(&conn, t.id)?;
+                        if !closed.is_empty() {
+                            println!("  closed with it: {}", closed.join(", "));
+                        }
+                        db::rollup_parent(&conn, t.id)?;
+                    }
                 }
                 TicketCmd::Assign { key, agent } => {
                     let t = db::ticket_by_ref(&conn, &key)?

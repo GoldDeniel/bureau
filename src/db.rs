@@ -653,6 +653,35 @@ pub fn set_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
     Ok(())
 }
 
+/// Close every non-terminal sub-ticket under `parent_id`, depth first.
+///
+/// A parent is the unit a human reviews: approving it must not leave its
+/// children stranded in `review` forever, which is how a solo reviewer ends up
+/// with a queue full of decisions they already made. Returns the refs closed.
+pub fn close_subtickets(conn: &Connection, parent_id: i64) -> Result<Vec<String>> {
+    let mut closed: Vec<String> = Vec::new();
+    let mut frontier = vec![parent_id];
+    while let Some(pid) = frontier.pop() {
+        let kids: Vec<(i64, String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, ref, COALESCE(status,'') FROM tickets WHERE parent_id=?1 ORDER BY id",
+            )?;
+            let rows = stmt.query_map([pid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<rusqlite::Result<Vec<(i64, String, String)>>>()?
+        };
+        for (id, ref_, status) in kids {
+            frontier.push(id);
+            if matches!(status.as_str(), "done" | "blocked" | "failed") {
+                continue;
+            }
+            set_status(conn, id, "done")?;
+            add_event(conn, "cascade", Some(id), None, "closed with its parent")?;
+            closed.push(ref_);
+        }
+    }
+    Ok(closed)
+}
+
 pub fn set_assignee(conn: &Connection, id: i64, agent_id: Option<i64>) -> Result<()> {
     conn.execute(
         "UPDATE tickets SET assignee_id=?1, updated_at=?2 WHERE id=?3",
@@ -1012,6 +1041,28 @@ mod tests {
         let last = note.last().unwrap().body.clone();
         assert!(last.contains("BUR-2 — done"), "{last}");
         assert!(last.contains("Ready for your review"), "{last}");
+    }
+
+    #[test]
+    #[test]
+    fn closing_a_parent_closes_its_subtickets() {
+        let db = mem();
+        let conn = db.lock().unwrap();
+        let div = create_division(&conn, "hexa", "Hexa", "", "/tmp").unwrap();
+        let w = create_agent(&conn, "builder", "B", "worker", Some(div), "demo", "", "").unwrap();
+        let parent = create_ticket(&conn, div, None, "Feature", "", 1, None, "human", "review").unwrap();
+        let a = create_ticket(&conn, div, Some(parent.id), "part a", "", 1, Some(w), "manager", "review").unwrap();
+        let b = create_ticket(&conn, div, Some(parent.id), "part b", "", 1, Some(w), "manager", "done").unwrap();
+        let grand = create_ticket(&conn, div, Some(a.id), "detail", "", 1, Some(w), "manager", "review").unwrap();
+
+        let closed = close_subtickets(&conn, parent.id).unwrap();
+        assert_eq!(closed, vec![a.ref_.clone(), grand.ref_.clone()], "only open children get closed");
+        for id in [a.id, grand.id, b.id] {
+            assert_eq!(ticket_by_id(&conn, id).unwrap().unwrap().status, "done");
+        }
+        assert_eq!(ticket_by_id(&conn, parent.id).unwrap().unwrap().status, "review");
+        // idempotent: a second accept closes nothing
+        assert!(close_subtickets(&conn, parent.id).unwrap().is_empty());
     }
 
     #[test]
