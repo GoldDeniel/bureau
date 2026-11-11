@@ -37,12 +37,13 @@ enum Cmd {
         /// Seconds between dispatch passes.
         #[arg(long, default_value_t = 20)]
         interval: u64,
-        #[arg(long, default_value_t = 2)]
+        /// How many worker jobs run at once.
+        #[arg(long, env = "BUREAU_MAX_PARALLEL", default_value_t = 5)]
         max_parallel: usize,
     },
     /// Run exactly one dispatch pass (managers triage, workers execute).
     Tick {
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, env = "BUREAU_MAX_PARALLEL", default_value_t = 5)]
         max_parallel: usize,
     },
     /// Add the default divisions and agents (idempotent).

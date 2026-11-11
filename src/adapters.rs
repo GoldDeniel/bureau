@@ -38,11 +38,24 @@ fn trim_output(s: &str) -> String {
     format!("{head}\n…(truncated)")
 }
 
-pub async fn run_agent(agent: &Agent, prompt: &str, ctx: &JobCtx) -> Result<String> {
-    let timeout = match ctx.kind {
-        JobKind::Manager => Duration::from_secs(420),
-        JobKind::Worker => Duration::from_secs(1800),
+/// Job budgets. Workers do real builds and captures, and a 30 min cap kept
+/// killing productive runs mid-file; two hours is the new default. Overridable
+/// because a slow model on a slow day should not need a rebuild.
+fn timeout_for(kind: JobKind) -> Duration {
+    let (var, default) = match kind {
+        JobKind::Manager => ("BUREAU_MANAGER_TIMEOUT_S", 420u64),
+        JobKind::Worker => ("BUREAU_WORKER_TIMEOUT_S", 7200u64),
     };
+    let secs = std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(default);
+    Duration::from_secs(secs)
+}
+
+pub async fn run_agent(agent: &Agent, prompt: &str, ctx: &JobCtx) -> Result<String> {
+    let timeout = timeout_for(ctx.kind);
     let fut = dispatch(agent, prompt, ctx);
     match tokio::time::timeout(timeout, fut).await {
         Ok(res) => res,
