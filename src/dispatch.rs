@@ -28,7 +28,8 @@ enum Job {
     },
 }
 
-/// One full pass over the company. Returns after every job it started has finished.
+/// Drain the company: start work until nothing is left to start, then wait for
+/// the last jobs to finish. Newly freed workers are picked up immediately.
 pub async fn tick(db: Db, max_parallel: usize) -> Result<TickReport> {
     let started = Instant::now();
     let mut report = TickReport::default();
@@ -42,28 +43,56 @@ pub async fn tick(db: Db, max_parallel: usize) -> Result<TickReport> {
         }
     }
 
-    // 2. Collect work.
-    let jobs = collect_jobs(&db)?;
-
-    // 3. Run a bounded batch, one job at a time per agent.
+    // 2. Keep the fleet busy: fill the fleet, then refill after every finished
+    //    job. Collecting again only once a job has actually settled avoids
+    //    spawning a duplicate for an agent whose status flip has not landed yet.
     let mut set = tokio::task::JoinSet::new();
-    for job in jobs.into_iter().take(max_parallel.max(1)) {
-        let db = db.clone();
-        match &job {
-            Job::Manager { .. } => report.managers_started += 1,
-            Job::Worker { .. } => report.workers_started += 1,
-        }
-        set.spawn(async move { run_job(db, job).await });
+    for job in collect_jobs(&db)?.into_iter().take(max_parallel.max(1)) {
+        spawn_job(&mut set, &mut report, db.clone(), job);
     }
-    while let Some(res) = set.join_next().await {
-        match res {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => report.errors.push(e.to_string()),
-            Err(e) => report.errors.push(format!("job panicked: {e}")),
+    loop {
+        if set.is_empty() {
+            let more = collect_jobs(&db)?;
+            if more.is_empty() {
+                break;
+            }
+            for job in more.into_iter().take(max_parallel.max(1)) {
+                spawn_job(&mut set, &mut report, db.clone(), job);
+            }
+            if set.is_empty() {
+                break;
+            }
+            continue;
+        }
+        match set.join_next().await {
+            Some(Ok(Ok(()))) => {}
+            Some(Ok(Err(e))) => report.errors.push(e.to_string()),
+            Some(Err(e)) => report.errors.push(format!("job panicked: {e}")),
+            None => break,
+        }
+        let free = max_parallel.max(1).saturating_sub(set.len());
+        if free > 0 {
+            for job in collect_jobs(&db)?.into_iter().take(free) {
+                spawn_job(&mut set, &mut report, db.clone(), job);
+            }
         }
     }
     report.ms = started.elapsed().as_millis();
     Ok(report)
+}
+
+
+fn spawn_job(
+    set: &mut tokio::task::JoinSet<Result<()>>,
+    report: &mut TickReport,
+    db: Db,
+    job: Job,
+) {
+    match &job {
+        Job::Manager { .. } => report.managers_started += 1,
+        Job::Worker { .. } => report.workers_started += 1,
+    }
+    set.spawn(async move { run_job(db, job).await });
 }
 
 fn collect_jobs(db: &Db) -> Result<Vec<Job>> {
@@ -340,6 +369,8 @@ Your team (workers in this division):
 Decide what happens to this ticket. Rules:
 - Split real work into 1–6 self-contained sub-tickets. A worker cannot see this ticket, so every sub-ticket needs enough context to stand alone (what to build, where, acceptance criteria).
 - Assign each sub-ticket to one worker slug from the list above. Never invent a slug.
+- Spread the work: never hand one worker more than two sub-tickets while another worker has none. Match the job to the speciality (QA and regression checks to the reviewer, research to the researcher, narrative to the storyteller, implementation to the builder).
+- If a title starts with a worker slug and a colon ("lens: ..."), assign it to that worker.
 - If the ticket is just a question or something you can settle in a paragraph, use "answer".
 - If it cannot proceed without a human decision, use "blocked" and say exactly what you need.
 
@@ -495,6 +526,20 @@ fn extract_json(raw: &str) -> Option<&str> {
     None
 }
 
+/// Who does this sub-ticket belong to? A slug written into the title ("lens: …")
+/// is the manager's most specific signal, so it wins over the JSON `agent`
+/// field — otherwise QA lands on the implementer and the queue serialises.
+fn pick_assignee<'a>(workers: &'a [Agent], title: &str, wanted: &str) -> Option<&'a Agent> {
+    let from_title = title
+        .split_once(':')
+        .map(|(head, _)| head.trim().to_lowercase())
+        .filter(|head| !head.contains(' '))
+        .and_then(|slug| workers.iter().find(|w| w.slug == slug));
+    from_title
+        .or_else(|| workers.iter().find(|w| w.slug == wanted))
+        .or_else(|| workers.first())
+}
+
 async fn apply_plan(
     db: &Db,
     ticket: &Ticket,
@@ -534,10 +579,7 @@ async fn apply_plan(
                 } else {
                     sub.title.trim().to_string()
                 };
-                let assignee = workers
-                    .iter()
-                    .find(|w| w.slug == sub.agent)
-                    .or_else(|| workers.first());
+                let assignee = pick_assignee(workers, &title, &sub.agent);
                 let body = if sub.body.trim().is_empty() {
                     format!(
                         "Part of {}: {}\n\n{}",
@@ -683,6 +725,51 @@ mod tests {
     #[test]
     fn rejects_output_without_json() {
         assert!(extract_json("no json here").is_none());
+    }
+
+    fn agent(slug: &str) -> Agent {
+        Agent {
+            id: 0,
+            slug: slug.into(),
+            name: slug.into(),
+            role: "worker".into(),
+            division_id: None,
+            division_slug: None,
+            adapter: "demo".into(),
+            model: String::new(),
+            system_hint: String::new(),
+            created_at: String::new(),
+            enabled: true,
+            status: "idle".into(),
+        }
+    }
+
+    #[test]
+    fn title_slug_beats_the_json_agent_field() {
+        let team = vec![agent("forge"), agent("lens")];
+        assert_eq!(
+            pick_assignee(&team, "lens: capture frames", "forge")
+                .unwrap()
+                .slug,
+            "lens"
+        );
+        assert_eq!(
+            pick_assignee(&team, "Rebuild trees", "lens").unwrap().slug,
+            "lens"
+        );
+        assert_eq!(
+            pick_assignee(&team, "Rebuild trees", "nobody")
+                .unwrap()
+                .slug,
+            "forge"
+        );
+        // A prose title with a colon must not hijack the assignment.
+        assert_eq!(
+            pick_assignee(&team, "Audio: charge loop", "lens")
+                .unwrap()
+                .slug,
+            "lens"
+        );
     }
 
     #[test]

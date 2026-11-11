@@ -93,20 +93,16 @@ async fn full_company_loop_over_http() {
     let parent_ref = body["ticket"]["ref"].as_str().unwrap().to_string();
     assert_eq!(body["ticket"]["status"], "new");
 
-    // Pass 1: manager triages and delegates.
+    // One pass now drains the company: the manager triages, and the workers it
+    // created are picked up in the same tick instead of waiting for the next one.
     let report = bureau::dispatch::tick(db.clone(), 4).await.unwrap();
     assert_eq!(report.managers_started, 1, "{report:?}");
-    let (_, body) = send(&app, "GET", &format!("/api/tickets/{parent_ref}"), None).await;
-    assert_eq!(body["ticket"]["status"], "triaged", "{body}");
-    assert!(body["ticket"]["children"].as_array().unwrap().len() >= 2);
-    assert!(!body["comments"].as_array().unwrap().is_empty());
-
-    // Pass 2: workers execute the delegated tickets.
-    let report = bureau::dispatch::tick(db.clone(), 4).await.unwrap();
     assert_eq!(report.workers_started, 2, "{report:?}");
     let (_, body) = send(&app, "GET", &format!("/api/tickets/{parent_ref}"), None).await;
     let kids = body["ticket"]["children"].as_array().unwrap();
+    assert!(kids.len() >= 2, "{body}");
     assert!(kids.iter().all(|k| k["status"] == "review"), "{body}");
+    assert!(!body["comments"].as_array().unwrap().is_empty());
     assert_eq!(
         body["ticket"]["status"], "review",
         "parent rolls up: {body}"
