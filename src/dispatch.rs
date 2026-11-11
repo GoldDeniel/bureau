@@ -71,6 +71,7 @@ fn collect_jobs(db: &Db) -> Result<Vec<Job>> {
     // Self-heal: a queued ticket assigned to a manager would never be picked
     // up by either loop, so hand it back to triage instead of stranding it.
     db::requeue_manager_assignments(&conn)?;
+    db::repair_parent_rollups(&conn)?;
     let mut jobs = Vec::new();
 
     for division in db::divisions(&conn)? {
@@ -152,12 +153,8 @@ async fn run_job(db: Db, job: Job) -> Result<()> {
                     apply_plan(&db, &ticket, &division, &manager, &workers, &output).await
                 }
                 Err(e) => {
-                    fail_ticket(
-                        &db,
-                        &ticket,
-                        &format!("manager {} failed: {e}", manager.slug),
-                    )
-                    .await
+                    let msg = format!("manager {} failed: {e}", manager.slug);
+                    fail_ticket(&db, &ticket, &msg, fatal_error(&msg)).await
                 }
             }
         }
@@ -217,25 +214,62 @@ async fn run_job(db: Db, job: Job) -> Result<()> {
                     Ok(())
                 }
                 Err(e) => {
-                    fail_ticket(&db, &ticket, &format!("worker {} failed: {e}", agent.slug)).await
+                    let msg = format!("worker {} failed: {e}", agent.slug);
+                    fail_ticket(&db, &ticket, &msg, fatal_error(&msg)).await
                 }
             }
         }
     }
 }
 
-async fn fail_ticket(db: &Db, ticket: &Ticket, message: &str) -> Result<()> {
-    let conn = db.lock().unwrap();
-    db::add_comment(&conn, ticket.id, "bureau", message)?;
+/// Errors that will fail the same way on every retry: a quota wall or a broken
+/// credential does not get better in 20 seconds, and retrying it three times per
+/// sub-ticket just fills the board with failures.
+fn fatal_error(message: &str) -> bool {
+    let m = message.to_lowercase();
+    [
+        "usage limit",
+        "quota",
+        "rate limit",
+        "unauthorized",
+        "invalid api key",
+        "authentication",
+        "no such file",
+    ]
+    .iter()
+    .any(|needle| m.contains(needle))
+}
+
+fn mark_failed(
+    conn: &rusqlite::Connection,
+    ticket: &Ticket,
+    message: &str,
+    force: bool,
+) -> Result<()> {
+    db::add_comment(conn, ticket.id, "bureau", message)?;
     let attempts: i64 = conn.query_row(
         "SELECT attempts FROM tickets WHERE id=?1",
         [ticket.id],
         |r| r.get(0),
     )?;
-    let status = if attempts >= 3 { "failed" } else { "queued" };
-    db::set_status(&conn, ticket.id, status)?;
-    db::add_event(&conn, "error", Some(ticket.id), None, message)?;
+    let status = if force || attempts >= 3 {
+        "failed"
+    } else {
+        "queued"
+    };
+    db::set_status(conn, ticket.id, status)?;
+    db::add_event(conn, "error", Some(ticket.id), None, message)?;
+    // A dead child must move its parent into the attention column, exactly like
+    // a child that finished: without this, parents sat in triaged forever.
+    if status == "failed" {
+        db::rollup_parent(conn, ticket.id)?;
+    }
     Ok(())
+}
+
+async fn fail_ticket(db: &Db, ticket: &Ticket, message: &str, force: bool) -> Result<()> {
+    let conn = db.lock().unwrap();
+    mark_failed(&conn, ticket, message, force)
 }
 
 /// Job log path next to the database: `<db dir>/logs/<ref>.log`.
@@ -649,5 +683,58 @@ mod tests {
     #[test]
     fn rejects_output_without_json() {
         assert!(extract_json("no json here").is_none());
+    }
+
+    #[test]
+    fn fatal_failures_are_recognised() {
+        assert!(fatal_error(
+            "worker forge failed: 'opencode' exited 1: Error: Free usage limit reached."
+        ));
+        assert!(fatal_error("manager mira failed: invalid api key"));
+        assert!(!fatal_error("worker forge failed: timed out after 600s"));
+    }
+
+    #[test]
+    fn a_failed_child_moves_its_parent_to_blocked() {
+        let dir = std::env::temp_dir().join(format!("bureau-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fail.db");
+        let _ = std::fs::remove_file(&path);
+        let db = db::open(path.to_str().unwrap()).unwrap();
+        let conn = db.lock().unwrap();
+
+        let hexa = db::create_division(&conn, "hexa", "Hexa", "", "/tmp").unwrap();
+        let worker =
+            db::create_agent(&conn, "w", "W", "worker", Some(hexa), "demo", "", "").unwrap();
+        let parent =
+            db::create_ticket(&conn, hexa, None, "Parent", "", 2, None, "human", "new").unwrap();
+        let child = db::create_ticket(
+            &conn,
+            hexa,
+            Some(parent.id),
+            "Child",
+            "",
+            2,
+            Some(worker),
+            "manager",
+            "queued",
+        )
+        .unwrap();
+        // Three attempts is the retry ceiling: the next failure is terminal.
+        conn.execute("UPDATE tickets SET attempts=3 WHERE id=?1", [child.id])
+            .unwrap();
+        let child_row = db::ticket_by_id(&conn, child.id).unwrap().unwrap();
+
+        mark_failed(&conn, &child_row, "worker w failed: usage limit", true).unwrap();
+
+        assert_eq!(
+            db::ticket_by_id(&conn, child.id).unwrap().unwrap().status,
+            "failed"
+        );
+        assert_eq!(
+            db::ticket_by_id(&conn, parent.id).unwrap().unwrap().status,
+            "blocked",
+            "a dead child must pull its parent into the attention column"
+        );
     }
 }

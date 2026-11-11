@@ -773,6 +773,31 @@ pub fn idle_workers_with_work(conn: &Connection) -> Result<Vec<i64>> {
 /// Keep a parent ticket in step with its children.
 /// Children waiting on a human (review) count as finished; a failed or blocked
 /// child pulls the parent into the attention column instead of pretending success.
+/// Parents whose children are all terminal but who never moved (older builds
+/// did not roll up on failure, and a crash can skip the last transition).
+/// Self-heal them every tick; returns how many parents were repaired.
+pub fn repair_parent_rollups(conn: &Connection) -> Result<usize> {
+    let stale: Vec<(i64, i64)> = conn
+        .prepare(
+            "SELECT p.id, (SELECT c2.id FROM tickets c2 WHERE c2.parent_id = p.id LIMIT 1)
+             FROM tickets p
+             WHERE p.status NOT IN ('review','done','blocked','failed')
+               AND EXISTS (SELECT 1 FROM tickets c WHERE c.parent_id = p.id)
+               AND NOT EXISTS (
+                     SELECT 1 FROM tickets c3
+                     WHERE c3.parent_id = p.id
+                       AND c3.status NOT IN ('done','review','blocked','failed'))",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut fixed = 0;
+    for (_pid, child_id) in stale {
+        rollup_parent(conn, child_id)?;
+        fixed += 1;
+    }
+    Ok(fixed)
+}
+
 pub fn rollup_parent(conn: &Connection, child_id: i64) -> Result<()> {
     let row: Option<(i64, String)> = conn
         .query_row(
@@ -972,5 +997,38 @@ mod tests {
         create_agent(&conn, "m1", "M1", "manager", Some(div), "demo", "", "").unwrap();
         let err = create_agent(&conn, "m2", "M2", "manager", Some(div), "demo", "", "");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn repair_rolls_up_parents_stranded_by_older_builds() {
+        let db = mem();
+        let conn = db.lock().unwrap();
+        let div = create_division(&conn, "hexa", "Hexa", "", "/tmp").unwrap();
+        let parent =
+            create_ticket(&conn, div, None, "Parent", "", 2, None, "human", "new").unwrap();
+        create_ticket(
+            &conn,
+            div,
+            Some(parent.id),
+            "Child",
+            "",
+            2,
+            None,
+            "manager",
+            "failed",
+        )
+        .unwrap();
+        assert_eq!(
+            ticket_by_id(&conn, parent.id).unwrap().unwrap().status,
+            "new",
+            "a stale parent stays untouched until the repair pass runs"
+        );
+        assert_eq!(repair_parent_rollups(&conn).unwrap(), 1);
+        assert_eq!(
+            ticket_by_id(&conn, parent.id).unwrap().unwrap().status,
+            "blocked"
+        );
+        // Idempotent: nothing left to repair.
+        assert_eq!(repair_parent_rollups(&conn).unwrap(), 0);
     }
 }
