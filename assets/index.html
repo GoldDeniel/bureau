@@ -384,7 +384,27 @@ const COLS = [
   {id:"attention", label:"Blocked", st:["blocked","failed"]},
 ];
 
-const S = { snap:null, division:"all", q:"", openRef:null, openData:null, busy:false, timer:null, showDone:false };
+const S = { snap:null, snapJson:null, division:"all", q:"", openRef:null, openData:null, openJson:null, drRef:null, logPin:null, busy:false, timer:null, showDone:false };
+
+// view state survives a reload: ticket in the hash, filters in localStorage
+const VIEW_KEY = "bureau_view", BOARD_KEY = "bureau_board";
+const view = (() => { try { return JSON.parse(localStorage.getItem(VIEW_KEY) || "{}"); } catch { return {}; } })();
+if (typeof view.division === "string") S.division = view.division;
+if (typeof view.q === "string") S.q = view.q;
+if (S.q) $("#search").value = S.q;
+S.showDone = !!view.showDone;
+const saveView = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify({division:S.division, q:S.q, showDone:S.showDone})); } catch {} };
+
+const boardScroll = (() => { try { const v = JSON.parse(localStorage.getItem(BOARD_KEY) || "{}"); return { left: +v.left || 0, cols: v.cols || {} }; } catch { return { left: 0, cols: {} }; } })();
+let boardSave = null;
+const persistBoard = () => { try { localStorage.setItem(BOARD_KEY, JSON.stringify(boardScroll)); } catch {} };
+$("#board").addEventListener("scroll", () => {
+  const board = $("#board");
+  boardScroll.left = board.scrollLeft;
+  board.querySelectorAll(".col").forEach(c => { const cs = c.querySelector(".cards"); if (cs) boardScroll.cols[c.dataset.col] = cs.scrollTop; });
+  clearTimeout(boardSave); boardSave = setTimeout(persistBoard, 250);
+}, true);
+addEventListener("beforeunload", persistBoard);
 
 const tok = () => localStorage.getItem("bureau_token") || "";
 async function api(path, opts={}, retried=false) {
@@ -430,8 +450,10 @@ function toast(msg, err=false) {
 async function load() {
   try {
     const snap = await api("/api/state");
-    S.snap = snap;
-    renderRail(); renderBoard(); renderFoot();
+    const key = JSON.stringify(snap);
+    const changed = key !== S.snapJson;
+    S.snap = snap; S.snapJson = key;
+    if (changed) { renderRail(); renderBoard(); renderFoot(); }
     if (S.openRef) refreshDrawer(true);
   } catch (e) {
     $("#foot-stats").textContent = "offline";
@@ -456,7 +478,7 @@ function renderRail() {
       <span class="cnt ${n?"hot":""}">${n}</span></button>`;
   });
   $("#divs").innerHTML = html;
-  $("#divs").querySelectorAll("[data-div]").forEach(b => b.onclick = () => { S.division = b.dataset.div; renderRail(); renderBoard(); });
+  $("#divs").querySelectorAll("[data-div]").forEach(b => b.onclick = () => { S.division = b.dataset.div; saveView(); renderRail(); renderBoard(); });
 
   const cur = s.divisions.find(d => d.slug === S.division);
   $("#ttl").textContent = cur ? cur.name : "All divisions";
@@ -515,17 +537,28 @@ function renderBoard() {
   $("#btn-done").textContent = `Done · ${done}`;
   const cols = COLS.filter(c => S.showDone || c.id !== "done");
   const board = $("#board");
-  const scrolls = [...board.querySelectorAll(".cards")].map(c => c.scrollTop);
+  // capture before the rewrite, so a refresh never loses the reader's place
+  if (board.querySelector(".col")) {
+    boardScroll.left = board.scrollLeft;
+    board.querySelectorAll(".col").forEach(c => {
+      const cs = c.querySelector(".cards");
+      if (cs) boardScroll.cols[c.dataset.col] = cs.scrollTop;
+    });
+  }
   board.innerHTML = cols.map(col => {
     const items = ts.filter(t => col.st.includes(t.status))
       .sort((a,b) => a.priority - b.priority || a.id - b.id);
-    return `<section class="col ${col.id}">
+    return `<section class="col ${col.id}" data-col="${col.id}">
       <div class="col-head"><span class="t">${col.label}</span><span class="n">${items.length}</span></div>
       <div class="cards">${items.length ? items.map(card).join("") : `<div class="empty">nothing here</div>`}</div>
     </section>`;
   }).join("");
-  [...board.querySelectorAll(".cards")].forEach((c,i) => c.scrollTop = scrolls[i] || 0);
-  board.querySelectorAll(".card").forEach(c => c.onclick = () => openTicket(c.dataset.ref));
+  // keyed by column id, so adding or removing Done never shifts another column's offset
+  board.querySelectorAll(".col").forEach(c => {
+    const cards = c.querySelector(".cards");
+    if (cards) cards.scrollTop = boardScroll.cols[c.dataset.col] || 0;
+  });
+  board.scrollLeft = boardScroll.left;
 }
 
 function renderFoot() {
@@ -535,29 +568,64 @@ function renderFoot() {
 }
 
 /* ---------------- drawer ---------------- */
-async function openTicket(ref) {
+const hashRef = () => {
+  const m = location.hash.match(/^#\/t\/([^/?#]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+};
+const setHash = (ref, push) => {
+  const url = location.pathname + location.search + (ref ? "#/t/" + encodeURIComponent(ref) : "");
+  if (push) history.pushState(null, "", url); else history.replaceState(null, "", url);
+};
+async function openTicket(ref, opts = {}) {
   S.openRef = ref;
+  S.openData = null; S.openJson = null; S.logPin = null;
   $("#backdrop").classList.add("show");
   $("#drawer").classList.add("show");
   $("#dr-body").innerHTML = `<div class="empty">loading…</div>`;
-  await refreshDrawer(false);
+  if (!opts.silent) setHash(ref, true);
+  const ok = await refreshDrawer(!!opts.restore);
+  if (S.openRef !== ref) return;
+  if (ok) return;
+  // a ref that no longer exists must not leave a dead drawer or a stale hash behind
+  closeDrawer({ silent: true });
+  setHash(null, false);
 }
-function closeDrawer() {
-  S.openRef = null; S.openData = null;
+function closeDrawer(opts = {}) {
+  S.openRef = null; S.openData = null; S.openJson = null; S.logPin = null;
   clearInterval(S.logTimer); S.logTimer = null;
   $("#backdrop").classList.remove("show");
   $("#drawer").classList.remove("show");
+  if (!opts.silent && hashRef()) setHash(null, false);
 }
 async function refreshDrawer(soft) {
-  if (!S.openRef) return;
+  if (!S.openRef) return false;
+  const ref = S.openRef;
+  const prev = S.openData && S.openData.ticket.ref;
   try {
-    const d = await api("/api/tickets/" + encodeURIComponent(S.openRef));
-    S.openData = d; renderDrawer();
-  } catch (e) { if (!soft) toast(e.message, true); }
+    const d = await api("/api/tickets/" + encodeURIComponent(ref));
+    if (S.openRef !== ref) return false;
+    const json = JSON.stringify(d);
+    if (S.openData && S.openJson === json) return true;   // unchanged: touch nothing (keeps scroll, selection, draft)
+    S.openJson = json; S.openData = d;
+    renderDrawer(prev === d.ticket.ref);
+    return true;
+  } catch (e) { if (!soft) toast(e.message, true); return false; }
 }
-function renderDrawer() {
+function renderDrawer(keep) {
   const d = S.openData; if (!d) return;
   const t = d.ticket;
+  // capture live UI state so a re-render never yanks the reader or clobbers a draft
+  const active = document.activeElement;
+  const actId = active && keep && $("#dr-body").contains(active) ? active.id : "";
+  const caret = actId === "dr-comment" ? [active.selectionStart, active.selectionEnd] : null;
+  const draft = $("#dr-comment");
+  const draftVal = draft ? draft.value : "";
+  const draftTop = draft ? draft.scrollTop : 0;
+  const bodyTop = keep ? $("#dr-body").scrollTop : 0;
+  const log = $("#dr-log");
+  const logTop = keep && log ? log.scrollTop : 0;
+  const logAtBottom = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+  S.logPin = keep && !logAtBottom ? { ref: t.ref, top: logTop } : null;
   $("#dr-ref").textContent = `${t.ref} · ${t.division_slug} · opened by ${t.created_by} · ${ago(t.created_at)}`;
   $("#dr-title").textContent = t.title;
 
@@ -609,7 +677,12 @@ function renderDrawer() {
       </div>
     </div>`;
 
-  $("#dr-body").querySelectorAll("[data-ref]").forEach(el => el.onclick = () => openTicket(el.dataset.ref));
+  $("#dr-body").scrollTop = bodyTop;
+  const cm = $("#dr-comment");
+  if (cm && keep) { cm.value = draftVal; cm.scrollTop = draftTop; }
+  if (caret && cm) { cm.focus(); cm.setSelectionRange(caret[0], caret[1]); }
+  else if (actId) { const el = document.getElementById(actId); if (el) el.focus(); }
+
   $("#dr-close").onclick = closeDrawer;
   $("#backdrop").onclick = closeDrawer;
   $("#dr-prio").onchange = async (e) => {
@@ -641,11 +714,13 @@ function watchLog(ref) {
     try {
       const d = await api(`/api/tickets/${encodeURIComponent(ref)}/log?lines=400`);
       const el = $("#dr-log"); if (!el) return;
-      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+      const pin = S.logPin && S.logPin.ref === ref ? S.logPin.top : null;
+      const atBottom = pin === null && el.scrollHeight - el.scrollTop - el.clientHeight < 48;
       el.textContent = d.lines.length
         ? d.lines.join("\n")
         : (d.exists ? "(waiting for output…)" : "no output yet — this agent has not run");
-      if (atBottom) el.scrollTop = el.scrollHeight;
+      if (pin !== null) { el.scrollTop = pin; S.logPin = null; }
+      else if (atBottom) el.scrollTop = el.scrollHeight;
     } catch (e) { /* drawer may have closed */ }
   };
   paint();
@@ -849,11 +924,15 @@ $("#dr-close").onclick = closeDrawer;
 $("#backdrop").onclick = closeDrawer;
 $("#modal-wrap").onclick = (e) => { if (e.target.id === "modal-wrap") closeModal(); };
 
+let focusKey = null;
 function openFocus(kind) {
   const log = kind === "log";
   const el = $(log ? "#dr-log" : kind === "result" ? "#dr-result" : "#dr-desc");
   const src = log ? (el?.textContent || "") : (el?.innerText || "");
   if (!src.trim()) return;
+  const key = kind + "|" + (S.openRef || "");
+  if (focusKey === key && $("#focus-wrap").classList.contains("show")) return;   // same view: keep scroll
+  focusKey = key;
   $("#focus-title").textContent = log ? "Agent output" : kind === "result" ? "Result" : "Description";
   $("#focus-ref").textContent = S.openRef || "";
   const body = $("#focus-body");
@@ -862,7 +941,7 @@ function openFocus(kind) {
   body.scrollTop = log ? body.scrollHeight : 0;   // logs follow the tail, prose starts at the top
   $("#focus-wrap").classList.add("show");
 }
-function closeFocus(){ $("#focus-wrap").classList.remove("show"); }
+function closeFocus(){ $("#focus-wrap").classList.remove("show"); focusKey = null; }
 $("#focus-close").onclick = closeFocus;
 $("#focus-copy").onclick = async () => {
   const b = $("#focus-copy");
@@ -911,8 +990,8 @@ $("#grip").addEventListener("dblclick", () => {
 });
 addEventListener("resize", () => setDrawerWidth(drawerEl.getBoundingClientRect().width));
 
-$("#search").oninput = (e) => { S.q = e.target.value.toLowerCase().trim(); renderBoard(); };
-$("#btn-done").onclick = () => { S.showDone = !S.showDone; renderBoard(); };
+$("#search").oninput = (e) => { S.q = e.target.value.toLowerCase().trim(); saveView(); renderBoard(); };
+$("#btn-done").onclick = () => { S.showDone = !S.showDone; saveView(); renderBoard(); };
 $("#btn-tick").onclick = async () => {
   if (S.busy) return;
   S.busy = true; $("#btn-tick").textContent = "dispatching…";
@@ -931,8 +1010,19 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "r") { load(); }
 });
 
-load();
+load().then(() => {
+  if (S.snap && S.division !== "all" && !S.snap.divisions.some(d => d.slug === S.division)) {
+    S.division = "all"; saveView(); renderRail(); renderBoard();
+  }
+  const r = hashRef();
+  if (r) openTicket(r, { silent: true, restore: true });
+});
 S.timer = setInterval(() => { if (!document.hidden) load(); }, 4000);
+addEventListener("hashchange", () => {
+  const r = hashRef();
+  if (r && r !== S.openRef) openTicket(r, { silent: true });
+  else if (!r && S.openRef) closeDrawer({ silent: true });
+});
 </script>
 </body>
 </html>
