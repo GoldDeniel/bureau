@@ -834,13 +834,33 @@ pub fn rollup_parent(conn: &Connection, child_id: i64) -> Result<()> {
     if total == 0 || open > 0 {
         return Ok(());
     }
+    // Name the sub-tickets: a parent that only says "3 of 4" makes the reviewer
+    // hunt for which ones, so every rollup lists refs with their final status.
+    let kids: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT ref, status FROM tickets WHERE parent_id=?1 ORDER BY id")?;
+        let rows = stmt
+            .query_map([pid], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+        rows
+    };
+    let bad_lines: String = kids
+        .iter()
+        .filter(|(_, st)| st == "blocked" || st == "failed")
+        .map(|(rf, st)| format!("• {rf} — {st}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let all_lines: String = kids
+        .iter()
+        .map(|(rf, st)| format!("• {rf} — {st}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     if bad > 0 {
         set_status(conn, pid, "blocked")?;
         add_comment(
             conn,
             pid,
             "bureau",
-            &format!("{bad} of {total} sub-tickets need attention — see them below."),
+            &format!("{bad} of {total} sub-tickets need attention:\n{bad_lines}"),
         )?;
         add_event(
             conn,
@@ -855,7 +875,7 @@ pub fn rollup_parent(conn: &Connection, child_id: i64) -> Result<()> {
             conn,
             pid,
             "bureau",
-            &format!("All {total} delegated sub-tickets are finished — ready for your review."),
+            &format!("All {total} delegated sub-tickets are finished:\n{all_lines}\nReady for your review."),
         )?;
         add_event(conn, "rollup", Some(pid), None, "all sub-tickets finished")?;
     }
@@ -987,6 +1007,29 @@ mod tests {
             ticket_by_id(&conn, parent.id).unwrap().unwrap().status,
             "review"
         );
+        // The rollup must name its sub-tickets, so the reviewer can jump to them.
+        let note = comments(&conn, parent.id).unwrap();
+        let last = note.last().unwrap().body.clone();
+        assert!(last.contains("BUR-2 — done"), "{last}");
+        assert!(last.contains("Ready for your review"), "{last}");
+    }
+
+    #[test]
+    fn blocked_rollup_names_only_the_failing_children() {
+        let db = mem();
+        let conn = db.lock().unwrap();
+        let div = create_division(&conn, "hexa", "Hexa", "", "/tmp").unwrap();
+        let w = create_agent(&conn, "builder", "B", "worker", Some(div), "demo", "", "",).unwrap();
+        let parent = create_ticket(&conn, div, None, "Ship", "", 2, None, "human", "new").unwrap();
+        let ok = create_ticket(&conn, div, Some(parent.id), "fine", "", 2, Some(w), "manager", "queued").unwrap();
+        let bad = create_ticket(&conn, div, Some(parent.id), "broken", "", 2, Some(w), "manager", "queued").unwrap();
+        set_status(&conn, ok.id, "review").unwrap();
+        set_status(&conn, bad.id, "failed").unwrap();
+        rollup_parent(&conn, bad.id).unwrap();
+        assert_eq!(ticket_by_id(&conn, parent.id).unwrap().unwrap().status, "blocked");
+        let note = comments(&conn, parent.id).unwrap().last().unwrap().body.clone();
+        assert!(note.contains("BUR-3 — failed"), "{note}");
+        assert!(!note.contains("BUR-2"), "passing children must not be listed: {note}");
     }
 
     #[test]
