@@ -34,7 +34,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/state", get(snapshot))
         .route("/api/divisions", get(list_divisions).post(create_division))
         .route("/api/agents", get(list_agents).post(create_agent))
-        .route("/api/agents/{slug}", patch(patch_agent))
+        .route(
+            "/api/agents/{slug}",
+            patch(patch_agent).delete(delete_agent),
+        )
         .route("/api/tickets", get(list_tickets).post(create_ticket))
         .route("/api/tickets/{key}", get(get_ticket).patch(patch_ticket))
         .route("/api/tickets/{key}/comment", post(add_comment))
@@ -333,6 +336,59 @@ async fn patch_agent(
     }
     db::update_agent(&conn, &slug, &patch)?;
     Ok(Json(json!({ "agent": db::agent_by_slug(&conn, &slug)? })))
+}
+
+#[derive(Deserialize)]
+struct DeleteAgentQuery {
+    reassign: Option<String>,
+}
+
+/// Delete an agent. Its open tickets go to `?reassign=<slug>` or back to
+/// triage; comments and events keep their history.
+async fn delete_agent(
+    State(st): State<AppState>,
+    Path(slug): Path<String>,
+    Query(q): Query<DeleteAgentQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = st.db.lock().unwrap();
+    let agent = db::agent_by_slug(&conn, &slug)?
+        .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    if agent.status == "running" {
+        return Err(
+            anyhow::anyhow!("agent {} is running; wait for it to finish first", slug).into(),
+        );
+    }
+    let reassign_to = match q.reassign.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(target) => {
+            let target_agent = db::agent_by_slug(&conn, target)?
+                .ok_or_else(|| anyhow::anyhow!("agent {} not found", target))?;
+            if target_agent.id == agent.id {
+                return Err(anyhow::anyhow!("cannot reassign {}'s tickets to itself", slug).into());
+            }
+            if target_agent.role != "worker" {
+                return Err(anyhow::anyhow!(
+                    "agent {} is a manager and cannot own tickets",
+                    target
+                )
+                .into());
+            }
+            if target_agent.division_id != agent.division_id {
+                return Err(anyhow::anyhow!(
+                    "agent {} is not in the same division as {}",
+                    target,
+                    slug
+                )
+                .into());
+            }
+            Some(target_agent.id)
+        }
+        None => None,
+    };
+    let tx = conn.transaction()?;
+    let reassigned = db::release_agent_tickets(&tx, agent.id, reassign_to)?;
+    db::delete_agent(&tx, &slug)?;
+    tx.commit()?;
+    Ok(Json(json!({ "deleted": slug, "reassigned": reassigned })))
 }
 
 // ---------------------------------------------------------------- tickets

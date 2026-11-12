@@ -7,16 +7,21 @@ use bureau::db::{self, Db};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tower::ServiceExt;
 
 fn temp_db_path() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir()
-        .join(format!("bureau-test-{nanos}.db"))
+        .join(format!(
+            "bureau-test-{}-{nanos}-{seq}.db",
+            std::process::id()
+        ))
         .to_string_lossy()
         .to_string()
 }
@@ -167,19 +172,22 @@ async fn board_ui_keeps_persistence_and_poll_contracts() {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8_lossy(&bytes);
     for needle in [
-        "bureau_view",            // division / done toggle / search
-        "bureau_board",           // board + column scroll
-        "bureau_dr_scroll",       // drawer read position
-        "S.snapJson",             // board poll short-circuit
-        "S.openJson === json",    // drawer poll short-circuit
-        "scrollTo(sx, sy)",        // page scroll survives a board repaint
-        "renderLive(snap.live || [])", // live chips still tick on an unchanged poll
-        "bodyHeight * 0.5",        // drawer scroll restore guarded against content loss
+        "bureau_view",                     // division / done toggle / search
+        "bureau_board",                    // board + column scroll
+        "bureau_dr_scroll",                // drawer read position
+        "S.snapJson",                      // board poll short-circuit
+        "S.openJson === json",             // drawer poll short-circuit
+        "scrollTo(sx, sy)",                // page scroll survives a board repaint
+        "renderLive(snap.live || [])",     // live chips still tick on an unchanged poll
+        "bodyHeight * 0.5",                // drawer scroll restore guarded against content loss
         "newLog.scrollTop = S.logPin.top", // agent log keeps its place
-        "cm.value = draftVal",     // half-typed comment survives a poll
-        "data-focus",             // full-size description/log overlay
-        "popstate",               // back/forward
-        ".call(history",          // unbound pushState/replaceState throws "Illegal invocation"
+        "cm.value = draftVal",             // half-typed comment survives a poll
+        "data-focus",                      // full-size description/log overlay
+        "f-div",                           // agent editor can move divisions
+        "ag-del",                          // agent editor has a delete button
+        "?reassign=",                      // delete can hand open tickets to a teammate
+        "popstate",                        // back/forward
+        ".call(history", // unbound pushState/replaceState throws "Illegal invocation"
     ] {
         assert!(html.contains(needle), "board is missing `{needle}`");
     }
@@ -315,4 +323,330 @@ async fn invalid_status_is_rejected() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("invalid status"));
+}
+
+#[tokio::test]
+async fn patch_agent_edits_name_role_and_division() {
+    let (app, db) = setup();
+    {
+        let conn = db.lock().unwrap();
+        let other = db::create_division(&conn, "other", "Other Division", "", "/tmp").unwrap();
+        db::create_agent(
+            &conn,
+            "mgr2",
+            "Manager Two",
+            "manager",
+            Some(other),
+            "demo",
+            "",
+            "",
+        )
+        .unwrap();
+    }
+
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        "/api/agents/w1",
+        Some(json!({"name": "Renamed", "division": "other"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["agent"]["name"], "Renamed", "{body}");
+    assert_eq!(body["agent"]["division_slug"], "other", "{body}");
+    assert_eq!(body["agent"]["role"], "worker", "{body}");
+
+    // "other" already has mgr2, so the one_manager_per_division index refuses.
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        "/api/agents/w1",
+        Some(json!({"role": "manager"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("already has a manager"),
+        "{body}"
+    );
+
+    let conn = db.lock().unwrap();
+    let agent = db::agent_by_slug(&conn, "w1").unwrap().unwrap();
+    assert_eq!(
+        agent.role, "worker",
+        "failed patch must not change the role"
+    );
+}
+
+#[tokio::test]
+async fn patch_agent_rejects_invalid_role_and_division() {
+    let (app, db) = setup();
+
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        "/api/agents/w1",
+        Some(json!({"role": "boss"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("invalid role"),
+        "{body}"
+    );
+
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        "/api/agents/w1",
+        Some(json!({"division": "nope"})),
+    )
+    .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("division nope not found"),
+        "{body}"
+    );
+
+    let conn = db.lock().unwrap();
+    let agent = db::agent_by_slug(&conn, "w1").unwrap().unwrap();
+    assert_eq!(agent.role, "worker");
+    assert_eq!(agent.division_slug.as_deref(), Some("test"));
+}
+
+#[tokio::test]
+async fn delete_agent_removes_it() {
+    let (app, db) = setup();
+
+    let (status, body) = send(&app, "DELETE", "/api/agents/w2", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], "w2", "{body}");
+
+    let (status, body) = send(&app, "GET", "/api/agents", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let slugs: Vec<&str> = body["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["slug"].as_str())
+        .collect();
+    assert!(!slugs.contains(&"w2"), "{body}");
+
+    let conn = db.lock().unwrap();
+    assert!(db::agent_by_slug(&conn, "w2").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delete_agent_unassigns_open_tickets_and_keeps_history() {
+    let (app, db) = setup();
+    let (_, body) = send(
+        &app,
+        "POST",
+        "/api/tickets",
+        Some(json!({"title": "in flight", "division": "test"})),
+    )
+    .await;
+    let ticket_ref = body["ticket"]["ref"].as_str().unwrap().to_string();
+
+    // Two patches: assigning first lets `status` stay in_progress afterwards.
+    for patch in [json!({"assignee": "w1"}), json!({"status": "in_progress"})] {
+        let (status, body) = send(
+            &app,
+            "PATCH",
+            &format!("/api/tickets/{ticket_ref}"),
+            Some(patch),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/api/tickets/{ticket_ref}/comment"),
+        Some(json!({"body": "w1 was here", "author": "w1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ticket_id = body["ticket"]["id"].as_i64().unwrap();
+    {
+        let conn = db.lock().unwrap();
+        let w1 = db::agent_by_slug(&conn, "w1").unwrap().unwrap();
+        db::add_event(
+            &conn,
+            "work",
+            Some(ticket_id),
+            Some(w1.id),
+            "w1 finished a step",
+        )
+        .unwrap();
+    }
+
+    let (status, body) = send(&app, "DELETE", "/api/agents/w1", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["reassigned"], 1, "{body}");
+
+    let (status, body) = send(&app, "GET", &format!("/api/tickets/{ticket_ref}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["ticket"]["assignee_id"].is_null(), "{body}");
+    assert_eq!(body["ticket"]["status"], "new", "{body}");
+    let comments = body["comments"].as_array().unwrap();
+    assert_eq!(comments.len(), 1, "{body}");
+    assert_eq!(comments[0]["author"], "w1", "{body}");
+    assert_eq!(comments[0]["body"], "w1 was here", "{body}");
+
+    let conn = db.lock().unwrap();
+    let event = db::events(&conn, 100)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.message == "w1 finished a step")
+        .expect("event history survives agent deletion");
+    assert!(
+        event.agent_id.is_none(),
+        "deleted agent must become NULL in event history"
+    );
+}
+
+#[tokio::test]
+async fn delete_agent_reassigns_open_tickets() {
+    let (app, db) = setup();
+    let (_, body) = send(
+        &app,
+        "POST",
+        "/api/tickets",
+        Some(json!({"title": "hand me over", "division": "test", "assignee": "w1"})),
+    )
+    .await;
+    let ticket_ref = body["ticket"]["ref"].as_str().unwrap().to_string();
+    assert_eq!(body["ticket"]["status"], "queued", "{body}");
+
+    let (status, body) = send(&app, "DELETE", "/api/agents/w1?reassign=w2", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["reassigned"], 1, "{body}");
+
+    let (_, body) = send(&app, "GET", &format!("/api/tickets/{ticket_ref}"), None).await;
+    assert_eq!(body["ticket"]["assignee_slug"], "w2", "{body}");
+    assert_eq!(body["ticket"]["status"], "queued", "{body}");
+
+    let conn = db.lock().unwrap();
+    assert!(db::agent_by_slug(&conn, "w1").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delete_agent_moves_open_tickets_and_keeps_history() {
+    let (app, db) = setup();
+    let mut refs = Vec::new();
+    {
+        let conn = db.lock().unwrap();
+        let d = db::division_by_slug(&conn, "test").unwrap().unwrap();
+        let w1 = db::agent_by_slug(&conn, "w1").unwrap().unwrap();
+        for status in ["triaged", "queued", "in_progress", "review", "done"] {
+            let t = db::create_ticket(
+                &conn,
+                d.id,
+                None,
+                status,
+                "",
+                2,
+                Some(w1.id),
+                "human",
+                status,
+            )
+            .unwrap();
+            refs.push((t.ref_, status.to_string()));
+        }
+        db::add_comment(&conn, 1, "w1", "historical comment").unwrap();
+    }
+
+    let (status, body) = send(&app, "DELETE", "/api/agents/w1?reassign=w2", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], "w1", "{body}");
+    assert_eq!(body["reassigned"], 4, "{body}");
+
+    let (_, body) = send(&app, "GET", "/api/agents", None).await;
+    let slugs: Vec<&str> = body["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["slug"].as_str())
+        .collect();
+    assert!(!slugs.contains(&"w1"), "{body}");
+
+    let (_, body) = send(&app, "GET", "/api/tickets", None).await;
+    for (r, old) in &refs {
+        let t = body["tickets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["ref"] == *r)
+            .unwrap();
+        if old == "done" {
+            assert!(
+                t["assignee_id"].is_null(),
+                "done ticket keeps its history: {t}"
+            );
+        } else {
+            assert_eq!(t["assignee_slug"], "w2", "{t}");
+            assert_ne!(
+                t["status"], "in_progress",
+                "reassigned work must be claimable again: {t}"
+            );
+        }
+    }
+
+    // No reassign: the remaining open tickets fall back to triage.
+    let (status, body) = send(&app, "DELETE", "/api/agents/w2", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["reassigned"], 4, "{body}");
+    let (_, body) = send(&app, "GET", "/api/tickets", None).await;
+    for (r, old) in &refs {
+        let t = body["tickets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["ref"] == *r)
+            .unwrap();
+        if old == "done" {
+            continue;
+        }
+        assert!(t["assignee_id"].is_null(), "{t}");
+        assert_eq!(t["status"], "new", "{t}");
+    }
+}
+
+#[tokio::test]
+async fn delete_agent_refuses_running_and_unknown() {
+    let (app, db) = setup();
+    {
+        let conn = db.lock().unwrap();
+        let w1 = db::agent_by_slug(&conn, "w1").unwrap().unwrap();
+        db::set_agent_status(&conn, w1.id, "running").unwrap();
+    }
+    let (status, body) = send(&app, "DELETE", "/api/agents/w1", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("running"),
+        "{body}"
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        let w1 = db::agent_by_slug(&conn, "w1")
+            .unwrap()
+            .expect("refused delete must keep the row");
+        assert_eq!(w1.status, "running");
+    }
+
+    let (status, body) = send(&app, "DELETE", "/api/agents/nope", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("not found"),
+        "{body}"
+    );
 }

@@ -523,6 +523,7 @@ async fn main() -> Result<()> {
                     disable,
                 } => {
                     let patch = db::AgentPatch {
+                        name: None,
                         adapter,
                         model,
                         system_hint: hint,
@@ -534,6 +535,7 @@ async fn main() -> Result<()> {
                             None
                         },
                         role: None,
+                        division: None,
                     };
                     db::agent_by_slug(&conn, &slug)?
                         .with_context(|| format!("agent '{slug}' not found"))?;

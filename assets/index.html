@@ -233,11 +233,20 @@
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
   .agents-tbl{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
-  .ag{display:grid;grid-template-columns:64px 1fr 96px 132px 26px;gap:7px;align-items:center;font-size:11px;background:#12151d;border:1px solid var(--line);border-radius:8px;padding:6px 8px}
-  .ag .s{font-family:ui-monospace,monospace;color:#c3cce4}
-  .ag .r{color:var(--dim);font-size:10px}
+  .ag{display:grid;grid-template-columns:64px 1fr 78px 78px 24px 22px;grid-template-areas:"slug name role div adapter del" "slug model model model enabled del";gap:6px 7px;align-items:center;font-size:11px;background:#12151d;border:1px solid var(--line);border-radius:8px;padding:6px 8px}
+  .ag .s{grid-area:slug;font-family:ui-monospace,monospace;color:#c3cce4;overflow-wrap:anywhere}
+  .ag .s .run{display:block;color:#d7b46a;font-size:9px;margin-top:2px}
+  .ag .f-name{grid-area:name}
+  .ag .f-role{grid-area:role}
+  .ag .f-div{grid-area:div}
+  .ag .f-adapter{grid-area:adapter}
+  .ag .f-model{grid-area:model}
+  .ag .f-enabled{grid-area:enabled}
+  .ag-del{grid-area:del;width:22px;height:22px;padding:0;line-height:1;border-radius:6px;font-size:14px;justify-self:end}
   .ag input,.ag select{background:#0f1219;border:1px solid #232838;border-radius:6px;padding:3px 5px;font-size:10.5px;width:100%;outline:none}
   .ag input[type=checkbox]{width:auto}
+  .ag-confirm{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:10.5px;color:var(--mut);padding:5px 8px;border:1px dashed #40232a;border-radius:8px;background:#171218}
+  .ag-confirm select{flex:1;min-width:110px;background:#0f1219;border:1px solid #232838;border-radius:6px;padding:3px 5px;font-size:10.5px}
   .evt{display:flex;gap:8px;font-size:11px;padding:5px 0;border-bottom:1px solid #1a1e2a;color:var(--mut)}
   .evt b{font-family:ui-monospace,monospace;font-weight:400;color:#93a4c9;min-width:52px}
   .evt .t{color:var(--dim);font-size:10px;margin-left:auto;white-space:nowrap}
@@ -281,6 +290,9 @@
     .drawer{width:100%!important;max-width:100vw}
     .dr-body .term{flex:0 0 auto;height:auto;min-height:200px;max-height:46vh;margin:0 -14px;padding:10px 14px}
     .grip{display:none}
+  }
+  @media (max-width:560px){
+    .ag{grid-template-columns:1fr 1fr;grid-template-areas:"slug del" "name name" "role div" "adapter enabled" "model model"}
   }
 
   /* ---------- readable + focus view ---------- */
@@ -913,11 +925,14 @@ function agentsModal() {
     return `<div class="sec" style="margin-top:10px">${esc(d.name)} <span style="color:#3f4759">· ${esc(d.slug)}</span></div>
       <div class="agents-tbl">${ags.map(a => `
         <div class="ag" data-slug="${esc(a.slug)}">
-          <span class="s">${esc(a.slug)}</span>
-          <span class="r">${esc(a.role)}${a.status==="running"?" · running":""}</span>
+          <span class="s" title="slug (API key)">${esc(a.slug)}${a.status==="running"?`<span class="run">running</span>`:""}</span>
+          <input class="f-name" value="${esc(a.name)}" placeholder="Name">
+          <select class="f-role">${["worker","manager"].map(r => `<option ${r===a.role?"selected":""}>${r}</option>`).join("")}</select>
+          <select class="f-div">${s.divisions.map(x => `<option value="${esc(x.slug)}" ${x.slug===a.division_slug?"selected":""}>${esc(x.name)}</option>`).join("")}</select>
           <select class="f-adapter">${s.adapters.map(x => `<option ${x===a.adapter?"selected":""}>${x}</option>`).join("")}</select>
           <input class="f-model" value="${esc(a.model)}" placeholder="model / command" title="model, or shell command with {{prompt}}">
           <input type="checkbox" class="f-enabled" ${a.enabled?"checked":""} title="enabled">
+          <button class="btn ghost danger ag-del" title="Delete agent" aria-label="Delete agent ${esc(a.slug)}">×</button>
         </div>`).join("") || `<div class="empty">no agents</div>`}</div>`;
   }).join("");
 
@@ -936,11 +951,56 @@ function agentsModal() {
     <div class="modal-actions"><button class="btn ghost" id="m-cancel">Close</button><button class="btn" id="na-create">Add agent</button></div>`);
 
   $("#m-cancel").onclick = closeModal;
+
+  // Deletes run immediately: the server moves the agent's open tickets to
+  // ?reassign=<slug> or back to triage, and the row leaves the DOM so Save
+  // never PATCHes it.
+  const deleteRow = async (row) => {
+    const slug = row.dataset.slug;
+    if (!window.confirm(`Delete agent ${slug}?`)) return;
+    const snap = S.snap;
+    const agent = snap.agents.find(a => a.slug === slug) || { id: -1, division_id: null };
+    const movable = ["triaged", "queued", "in_progress", "review"];
+    const open = snap.tickets.filter(t => t.assignee_slug === slug && movable.includes(t.status));
+
+    const run = async (reassign) => {
+      try {
+        const q = reassign ? "?reassign=" + encodeURIComponent(reassign) : "";
+        await api("/api/agents/" + encodeURIComponent(slug) + q, { method: "DELETE" });
+        row.remove();
+        toast(`deleted ${slug}${open.length ? ` · ${open.length} ticket${open.length===1?"":"s"} moved` : ""}`);
+        load();
+      } catch (e) { toast(e.message, true); }
+    };
+    if (!open.length) return run("");
+
+    const mates = snap.agents.filter(a => a.id !== agent.id && a.division_id === agent.division_id && a.role === "worker");
+    const strip = document.createElement("div");
+    strip.className = "ag-confirm";
+    strip.innerHTML = `<span>${open.length} open ticket${open.length===1?"":"s"}:</span>
+      <select><option value="">— send back to triage —</option>${mates.map(m => `<option value="${esc(m.slug)}">${esc(m.slug)}</option>`).join("")}</select>
+      <button class="btn small ghost" data-x="cancel">Cancel</button>
+      <button class="btn small danger" data-x="ok">Delete</button>`;
+    row.after(strip);
+    strip.querySelector('[data-x="cancel"]').onclick = () => strip.remove();
+    strip.querySelector('[data-x="ok"]').onclick = () => {
+      const reassign = strip.querySelector("select").value;
+      strip.remove(); run(reassign);
+    };
+  };
+  $("#modal").querySelectorAll(".ag-del").forEach(b => { b.onclick = () => deleteRow(b.closest(".ag")); });
+
   $("#save-agents").onclick = async () => {
     const rows = [...$("#modal").querySelectorAll(".ag")];
+    for (const r of rows) {
+      if (!r.querySelector(".f-name").value.trim()) return toast("name is required for " + r.dataset.slug, true);
+    }
     try {
       for (const r of rows) {
-        await api("/api/agents/" + r.dataset.slug, {method:"PATCH", body:{
+        await api("/api/agents/" + encodeURIComponent(r.dataset.slug), {method:"PATCH", body:{
+          name: r.querySelector(".f-name").value.trim(),
+          role: r.querySelector(".f-role").value,
+          division: r.querySelector(".f-div").value,
           adapter: r.querySelector(".f-adapter").value,
           model: r.querySelector(".f-model").value,
           enabled: r.querySelector(".f-enabled").checked,

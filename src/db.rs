@@ -452,39 +452,103 @@ pub fn create_agent(
 
 #[derive(Debug, Default, Deserialize)]
 pub struct AgentPatch {
+    pub name: Option<String>,
     pub adapter: Option<String>,
     pub model: Option<String>,
     pub system_hint: Option<String>,
     pub enabled: Option<bool>,
     pub role: Option<String>,
+    pub division: Option<String>,
 }
 
+/// One UPDATE for every optional field, so a role change and a division move
+/// cannot half-apply. The partial unique index on managers is the only
+/// constraint a patch can hit; it is reported as a plain API error.
 pub fn update_agent(conn: &Connection, slug: &str, p: &AgentPatch) -> Result<()> {
-    if let Some(v) = &p.adapter {
-        conn.execute(
-            "UPDATE agents SET adapter=?1 WHERE slug=?2",
-            params![v, slug],
-        )?;
+    if let Some(role) = &p.role
+        && !matches!(role.as_str(), "manager" | "worker")
+    {
+        anyhow::bail!("invalid role '{}': expected 'manager' or 'worker'", role);
     }
-    if let Some(v) = &p.model {
-        conn.execute("UPDATE agents SET model=?1 WHERE slug=?2", params![v, slug])?;
-    }
-    if let Some(v) = &p.system_hint {
-        conn.execute(
-            "UPDATE agents SET system_hint=?1 WHERE slug=?2",
-            params![v, slug],
-        )?;
-    }
-    if let Some(v) = p.enabled {
-        conn.execute(
-            "UPDATE agents SET enabled=?1 WHERE slug=?2",
-            params![v as i64, slug],
-        )?;
-    }
-    if let Some(v) = &p.role {
-        conn.execute("UPDATE agents SET role=?1 WHERE slug=?2", params![v, slug])?;
+    let division_id = match &p.division {
+        Some(div) => Some(
+            division_by_slug(conn, div)?
+                .ok_or_else(|| anyhow::anyhow!("division {} not found", div))?
+                .id,
+        ),
+        None => None,
+    };
+    let changed = conn
+        .execute(
+            "UPDATE agents SET
+                name        = COALESCE(?1, name),
+                adapter     = COALESCE(?2, adapter),
+                model       = COALESCE(?3, model),
+                system_hint = COALESCE(?4, system_hint),
+                enabled     = COALESCE(?5, enabled),
+                role        = COALESCE(?6, role),
+                division_id = COALESCE(?7, division_id)
+             WHERE slug = ?8",
+            params![
+                &p.name,
+                &p.adapter,
+                &p.model,
+                &p.system_hint,
+                p.enabled.map(|b| b as i64),
+                &p.role,
+                division_id,
+                slug
+            ],
+        )
+        .map_err(|e| {
+            if e.to_string()
+                .contains("UNIQUE constraint failed: agents.division_id")
+            {
+                anyhow::anyhow!(
+                    "division already has a manager; demote it before promoting {slug}"
+                )
+            } else {
+                e.into()
+            }
+        })?;
+    if changed == 0 {
+        anyhow::bail!("agent {} not found", slug);
     }
     Ok(())
+}
+
+/// Delete an agent row. Call `release_agent_tickets` first: the foreign key
+/// would clear `assignee_id` but leave the tickets stuck in their old status.
+pub fn delete_agent(conn: &Connection, slug: &str) -> Result<()> {
+    let changed = conn.execute("DELETE FROM agents WHERE slug=?1", [slug])?;
+    if changed == 0 {
+        anyhow::bail!("agent {} not found", slug);
+    }
+    Ok(())
+}
+
+/// Hand an agent's open tickets to `reassign_to`, or back to triage when None.
+/// Returns the number of tickets moved.
+pub fn release_agent_tickets(
+    conn: &Connection,
+    agent_id: i64,
+    reassign_to: Option<i64>,
+) -> Result<usize> {
+    let moved = conn.execute(
+        "UPDATE tickets SET
+            assignee_id = ?1,
+            status      = CASE
+                WHEN ?1 IS NULL THEN 'new'
+                WHEN status IN ('triaged','in_progress') THEN 'queued'
+                ELSE status
+            END,
+            lease_until = NULL,
+            updated_at  = ?2
+         WHERE assignee_id = ?3
+           AND status IN ('triaged','queued','in_progress','review')",
+        params![reassign_to, now(), agent_id],
+    )?;
+    Ok(moved)
 }
 
 pub fn set_agent_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
