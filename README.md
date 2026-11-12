@@ -40,6 +40,21 @@ real work.
 
 ---
 
+## Dependencies
+
+**To run a package:** nothing beyond libc and systemd. SQLite is compiled into the
+binary (`rusqlite` with the `bundled` feature), so there is no `libsqlite3-dev` to
+install and no database server to run. No OpenSSL either.
+
+**To build from source:**
+
+- Rust with `cargo`. The crate is `edition = "2024"`, so **rustc 1.85 or newer**.
+  `rustup` is the easy path; distro packages work too.
+  Fedora / Nobara: `sudo dnf install cargo rust` · Debian / Ubuntu: `sudo apt install cargo rustc`
+- A C compiler and linker, for the bundled SQLite:
+  `sudo dnf group install "Development Tools"` · `sudo apt install build-essential`
+- `pkg-config` is **not** required.
+
 ## Install
 
 Two ways to get a binary: **build from source** (fastest for development) or

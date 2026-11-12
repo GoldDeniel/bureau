@@ -3,23 +3,35 @@
 Packages install the binary, a systemd template unit and docs. The ticket
 database is created on first start under `/var/lib/bureau/<user>/`.
 
-## Arch / CachyOS
+## Dependencies
+
+Running a package needs only libc + systemd: SQLite is compiled into the binary
+(`rusqlite`, `bundled`), so no `libsqlite3-dev`, no database server, no OpenSSL.
+
+Building from source needs Rust **1.85+** (`edition = "2024"`) plus a C compiler for
+the bundled SQLite (`sudo dnf group install "Development Tools"` /
+`sudo apt install build-essential`). Building a package additionally needs one tool:
+`rpmbuild` for RPM, `makepkg` on an Arch-family host for the Arch package, nothing
+extra for the .deb. `packaging/build-all.sh` builds only the formats your distro can
+produce and reports the others as skipped.
+
+## Fedora / RHEL / Nobara
 
 ```bash
-sudo pacman -U bureau-0.4.0-1-x86_64.pkg.tar.zst
+sudo dnf install ./dist/bureau-*.rpm
 ```
 
 ## Debian / Ubuntu
 
 ```bash
-sudo apt install ./bureau_0.4.0_amd64.deb     # resolves libc6 automatically
-# or: sudo dpkg -i bureau_0.4.0_amd64.deb && sudo apt -f install
+sudo apt install ./dist/bureau_*.deb          # resolves libc6 automatically
+# or: sudo dpkg -i ./dist/bureau_*.deb && sudo apt -f install
 ```
 
-## Fedora / RHEL
+## Arch / CachyOS
 
 ```bash
-sudo dnf install ./bureau-0.4.0-1.x86_64.rpm
+sudo pacman -U ./dist/bureau-*-x86_64.pkg.tar.zst
 ```
 
 ## Start it
@@ -33,6 +45,13 @@ systemctl status bureau@$USER
 ```
 
 First start runs `bureau init`, which seeds the divisions and a welcome ticket.
+
+**`inactive (dead)` is almost always "never started", not "crashed".** Packages ship
+the unit disabled on purpose. `systemctl show bureau@$USER -p Result` returning
+`success` with `NRestarts=0` confirms nothing ever ran, and the proof is the state
+directory: a first start creates `/var/lib/bureau/<user>/`, so if `/var/lib/bureau/`
+is missing there has been no successful start. Fix with the `enable --now` line
+above; then read `journalctl -u bureau@$USER -n 40` if it still fails.
 
 ## Open the board
 
