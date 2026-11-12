@@ -39,7 +39,7 @@ and grass (GrassField), so keep an eye on frame time. Prefer clean, DRY scene/sc
         slug: "example-web-app",
         name: "Example Web App",
         repo: "example-web-app",
-        charter: "Example Web App project — http://localhost/Example Web App. Inspect the repo's README before \
+        charter: "Example web app at http://localhost/example-web-app. Inspect the repo's README before \
 assigning work; keep changes small and verifiable.",
         manager: ("sol", "Sol"),
         workers: [
@@ -71,7 +71,7 @@ Inspect the repo's README/package.json before starting.",
         slug: "example-portfolio",
         name: "Example Portfolio Site",
         repo: "example-portfolio",
-        charter: "the studio's production site. Inspect the repo first; keep the visual \
+        charter: "The studio's production site. Inspect the repo first; keep the visual \
 language consistent and the build green.",
         manager: ("kai", "Kai"),
         workers: [
