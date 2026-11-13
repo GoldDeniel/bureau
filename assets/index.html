@@ -1117,10 +1117,12 @@ async function agentsModal() {
 }
 
 /* ---------------- agent skills & plugins drawer ---------------- */
-const AG = { slug:null, data:null, busy:false, mode:null };
+const AG = { slug:null, data:null, busy:false, mode:null, warmTimer:null, warmTries:0 };
 
 function closeAgentDrawer() {
+  clearTimeout(AG.warmTimer);
   AG.slug = null; AG.data = null; AG.busy = false; AG.mode = null;
+  AG.warmTimer = null; AG.warmTries = 0;
   $("#agent-drawer").classList.remove("show");
   if ($("#drawer").classList.contains("show")) {
     $("#backdrop").classList.add("show");
@@ -1131,7 +1133,9 @@ function closeAgentDrawer() {
 }
 
 async function openAgent(slug) {
+  clearTimeout(AG.warmTimer);
   AG.slug = slug; AG.data = null; AG.busy = false; AG.mode = null;
+  AG.warmTimer = null; AG.warmTries = 0;
   $("#agent-drawer").classList.add("show");
   $("#backdrop").classList.add("show");
   $("#backdrop").onclick = closeAgentDrawer;
@@ -1149,6 +1153,14 @@ async function loadAgentDetail() {
     if (AG.slug !== slug) return;
     AG.data = d;
     renderAgentDrawer();
+    // The first uncached read answers from an empty cache while discovery
+    // warms in the background. Retry briefly instead of leaving "none".
+    const disc = d.toggles && d.toggles.discovery;
+    if (disc && disc.skills_source === "pending" && AG.warmTries < 20) {
+      AG.warmTries++;
+      clearTimeout(AG.warmTimer);
+      AG.warmTimer = setTimeout(() => { if (AG.slug === slug) loadAgentDetail(); }, 300);
+    }
   } catch (e) {
     if (AG.slug !== slug) return;
     // The discovery backend may not be deployed yet; the drawer must say so
@@ -1201,9 +1213,10 @@ function renderAgentDrawer() {
   AG.mode = mode;
   const skills = Array.isArray(t.skills) ? t.skills : [];
   const plugins = Array.isArray(t.plugins) ? t.plugins : [];
+  const warm = t.discovery && t.discovery.skills_source === "pending";
   const sec = (title, kind, items) => `<div class="ad-sec">
       <div class="sec">${title} <span class="hint">· ${items.length} discovered</span></div>
-      ${items.length ? `<div class="tgl-list">${items.map(i => toggleRow(kind, i, mode)).join("")}</div>` : `<div class="empty">none discovered</div>`}
+      ${items.length ? `<div class="tgl-list">${items.map(i => toggleRow(kind, i, mode)).join("")}</div>` : `<div class="empty">${warm ? "discovering…" : "none discovered"}</div>`}
     </div>`;
   $("#ad-ref").textContent = (a.slug || AG.slug || "") + (a.division_slug ? " · " + a.division_slug : "");
   $("#ad-title").textContent = (a.name || a.slug || AG.slug) + " · skills & plugins";
@@ -1221,7 +1234,7 @@ function renderAgentDrawer() {
     ${sec("Skills", "skills", skills)}
     ${sec("Plugins", "plugins", plugins)}
     <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap">
-      <button class="btn small" id="ad-save">Save selection</button>
+      <button class="btn small" id="ad-save"${warm ? " disabled" : ""}>Save selection</button>
       <button class="btn small ghost" id="ad-refresh" title="Re-read discovery from disk without reloading the page">Refresh discovery</button>
     </div>
     <div class="ad-status" id="ad-status"></div>
@@ -1263,6 +1276,11 @@ function onAgentModeChange(mode) {
 async function saveAgentToggles() {
   const slug = AG.slug;
   if (!slug || AG.busy) return;
+  const disc = AG.data && AG.data.toggles && AG.data.toggles.discovery;
+  if (disc && disc.skills_source === "pending") {
+    toast("discovery is still loading", true);
+    return;
+  }
   const mode = $("#ad-mode").value;
   const picked = (kind) => [...$("#ad-body").querySelectorAll(`input[data-kind="${kind}"]:checked`)]
     .filter(i => !i.closest(".unavailable")).map(i => i.dataset.name);

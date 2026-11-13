@@ -4,6 +4,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use bureau::api::{AppState, router};
 use bureau::db::{self, Db};
+use bureau::discovery;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -189,9 +190,36 @@ async fn board_ui_keeps_persistence_and_poll_contracts() {
         "?reassign=",                      // delete can hand open tickets to a teammate
         "popstate",                        // back/forward
         ".call(history", // unbound pushState/replaceState throws "Illegal invocation"
+        "agent-drawer",              // skills & plugins drawer exists
+        "Skills &amp; plugins",      // drawer heading
+        "renderAgentDrawer",         // drawer render path
+        "/api/discovery/refresh",    // explicit refresh button
+        "/toggles",                  // save target
+        "plugin_profile",            // old agent profile field still in the editor
+        "warmTries",                 // drawer retries while discovery warms
+        "discovery is still loading", // save is blocked during the warm-up window
     ] {
         assert!(html.contains(needle), "board is missing `{needle}`");
     }
+}
+
+/// The board's first paint and 4 s poll use GET /api/state and GET /. Neither
+/// may warm discovery: that path can spawn `opencode debug skill`.
+#[tokio::test]
+async fn board_load_and_poll_do_not_touch_discovery() {
+    let (app, _db) = setup();
+
+    let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    resp.into_body().collect().await.unwrap();
+
+    let (status, _) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        discovery::cached().is_none(),
+        "page load or the 4 s poll warmed the discovery cache"
+    );
 }
 
 #[tokio::test]
