@@ -220,6 +220,42 @@
   .composer textarea:focus{border-color:#33405f}
   .dr-actions{display:flex;gap:7px;flex-wrap:wrap;padding-top:2px}
 
+  /* ---------- agent skills & plugins drawer ---------- */
+  .agent-dr{width:660px}
+  .ad-mode{display:flex;align-items:center;gap:9px;flex-wrap:wrap;background:#12151d;border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:11.5px}
+  .ad-mode select{background:#141824;border:1px solid var(--line);border-radius:7px;padding:4px 7px;font-size:11.5px;outline:none}
+  .ad-mode .ad-note{flex-basis:100%;color:var(--dim);font-size:10.5px;line-height:1.45}
+  .ad-sec{display:flex;flex-direction:column;gap:7px}
+  .tgl-list{display:flex;flex-direction:column;gap:4px}
+  .tgl{display:flex;align-items:center;gap:8px;background:#12151d;border:1px solid var(--line);border-radius:8px;padding:5px 9px;font-size:11.5px}
+  .tgl input{accent-color:var(--acc);flex:none}
+  .tgl.ro{opacity:.62}
+  .tgl.unavailable{border-color:#40232a}
+  .tgl .nm{font-family:ui-monospace,monospace;color:#c3cce4;overflow-wrap:anywhere}
+  .tgl .badge{margin-left:auto}
+  .tgl .why{color:#d99a9a;font-size:10.5px;text-align:right}
+  .badge{font-size:9.5px;letter-spacing:.04em;border:1px solid var(--line);border-radius:5px;padding:0 5px;color:var(--mut);background:#151a26;white-space:nowrap}
+  .b-inherited{color:#93a4c9;border-color:#2b3550;background:#161b2a}
+  .b-explicit{color:#86efac;border-color:#234132;background:#101d16}
+  .b-unavailable{color:#fca5a5;border-color:#40232a;background:#1d1417}
+  .b-stale{color:#fcd34d;border-color:#453a1d;background:#1d1a10}
+  .ad-disc{color:var(--dim);font-size:10.5px;line-height:1.55;overflow-wrap:anywhere}
+  .ad-disc code{font-size:10px}
+  .ad-status{font-size:11px;color:var(--mut);min-height:15px}
+  .ad-status.ok{color:#86efac}
+  .ad-status.bad{color:#ffb4b4}
+  .ad-valid{font-size:10.5px;color:var(--mut);display:flex;flex-direction:column;gap:3px}
+  .ad-valid code{font-size:10px}
+  .ad-run{display:flex;flex-direction:column;gap:4px;background:#12151d;border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:11.5px}
+  .ad-run .dim{color:var(--dim)}
+  .ad-honoured.yes{color:#86efac}
+  .ad-honoured.no{color:#ffb4b4}
+  .ad-honoured.unknown{color:var(--warn)}
+  .ad-run details summary{cursor:pointer;color:var(--mut);font-size:10.5px}
+  .ad-evidence{margin:6px 0 0;max-height:220px;overflow:auto;background:#0a0c11;border:1px solid var(--line);border-radius:7px;padding:7px 9px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;line-height:1.55;color:#c3ccdd;white-space:pre-wrap;word-break:break-word}
+  .ag-open{display:block;margin-top:2px;padding:0;font-size:9px;color:var(--acc);text-align:left;font-family:inherit}
+  .ag-open:hover{text-decoration:underline}
+
   /* ---------- modal ---------- */
   .modal-wrap{position:fixed;inset:0;z-index:60;display:none;align-items:center;justify-content:center;background:rgba(4,5,8,.6);padding:20px}
   .modal-wrap.show{display:flex}
@@ -364,6 +400,17 @@
   <div class="dr-body" id="dr-body"></div>
 </aside>
 
+<aside class="drawer agent-dr" id="agent-drawer" aria-label="Agent skills and plugins">
+  <div class="dr-head">
+    <div style="flex:1">
+      <div class="ref" id="ad-ref"></div>
+      <h2 id="ad-title">Skills &amp; plugins</h2>
+    </div>
+    <button class="btn ghost small" id="ad-close">✕</button>
+  </div>
+  <div class="dr-body" id="ad-body"></div>
+</aside>
+
 <div class="focus-wrap" id="focus-wrap"><div class="focus-card">
   <div class="focus-head"><span class="ft" id="focus-title">Agent output</span><span class="fr" id="focus-ref"></span>
     <span style="margin-left:auto;display:flex;gap:7px">
@@ -456,7 +503,12 @@ async function api(path, opts={}, retried=false) {
     throw new Error("access token required");
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || (res.status + " " + res.statusText));
+  if (!res.ok) {
+    const err = new Error(data.error || (res.status + " " + res.statusText));
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 // ?token=… in the URL bootstraps localStorage, then disappears from the address bar.
@@ -687,6 +739,7 @@ function closeDrawer(opts = {}) {
   clearInterval(S.logTimer); S.logTimer = null;
   $("#backdrop").classList.remove("show");
   $("#drawer").classList.remove("show");
+  if ($("#agent-drawer").classList.contains("show")) $("#backdrop").classList.add("show");
   if (!opts.silent) writeStateToUrl(false);
 }
 
@@ -790,7 +843,12 @@ function renderDrawer(keep) {
   else if (actId) { const el = document.getElementById(actId); if (el) el.focus({ preventScroll: true }); }
 
   $("#dr-close").onclick = closeDrawer;
-  $("#backdrop").onclick = closeDrawer;
+  // The agent drawer can sit on top of an open ticket drawer; the shared
+  // backdrop must still close the topmost one.
+  $("#backdrop").onclick = () => {
+    if ($("#agent-drawer").classList.contains("show")) closeAgentDrawer();
+    else closeDrawer();
+  };
   $("#dr-prio").onchange = async (e) => {
     await api("/api/tickets/" + t.ref, {method:"PATCH", body:{priority:+e.target.value}});
     toast(`priority → P${e.target.value}`); load(); refreshDrawer(true);
@@ -957,7 +1015,7 @@ async function agentsModal() {
     return `<div class="sec" style="margin-top:10px">${esc(d.name)} <span style="color:#3f4759">· ${esc(d.slug)}</span></div>
       <div class="agents-tbl">${ags.map(a => `
         <div class="ag" data-slug="${esc(a.slug)}">
-          <span class="s" title="slug (API key)">${esc(a.slug)}${a.status==="running"?`<span class="run">running</span>`:""}</span>
+          <span class="s" title="slug (API key)">${esc(a.slug)}<button class="ag-open" data-slug="${esc(a.slug)}" title="Skills &amp; plugins for ${esc(a.slug)}">skills ⚙</button>${a.status==="running"?`<span class="run">running</span>`:""}</span>
           <input class="f-name" value="${esc(a.name)}" placeholder="Name">
           <select class="f-role">${["worker","manager"].map(r => `<option ${r===a.role?"selected":""}>${r}</option>`).join("")}</select>
           <select class="f-div">${s.divisions.map(x => `<option value="${esc(x.slug)}" ${x.slug===a.division_slug?"selected":""}>${esc(x.name)}</option>`).join("")}</select>
@@ -1023,6 +1081,7 @@ async function agentsModal() {
     };
   };
   $("#modal").querySelectorAll(".ag-del").forEach(b => { b.onclick = () => deleteRow(b.closest(".ag")); });
+  $("#modal").querySelectorAll(".ag-open").forEach(b => { b.onclick = () => { closeModal(); openAgent(b.dataset.slug); }; });
 
   $("#save-agents").onclick = async () => {
     const rows = [...$("#modal").querySelectorAll(".ag")];
@@ -1055,6 +1114,216 @@ async function agentsModal() {
       toast("agent added"); closeModal(); load();
     } catch (e) { toast(e.message, true); }
   };
+}
+
+/* ---------------- agent skills & plugins drawer ---------------- */
+const AG = { slug:null, data:null, busy:false, mode:null };
+
+function closeAgentDrawer() {
+  AG.slug = null; AG.data = null; AG.busy = false; AG.mode = null;
+  $("#agent-drawer").classList.remove("show");
+  if ($("#drawer").classList.contains("show")) {
+    $("#backdrop").classList.add("show");
+    $("#backdrop").onclick = closeDrawer;
+  } else {
+    $("#backdrop").classList.remove("show");
+  }
+}
+
+async function openAgent(slug) {
+  AG.slug = slug; AG.data = null; AG.busy = false; AG.mode = null;
+  $("#agent-drawer").classList.add("show");
+  $("#backdrop").classList.add("show");
+  $("#backdrop").onclick = closeAgentDrawer;
+  $("#ad-ref").textContent = slug;
+  $("#ad-title").textContent = "Skills & plugins";
+  $("#ad-body").innerHTML = `<div class="empty">loading skills and plugins…</div>`;
+  await loadAgentDetail();
+}
+
+async function loadAgentDetail() {
+  const slug = AG.slug;
+  if (!slug) return;
+  try {
+    const d = await api("/api/agents/" + encodeURIComponent(slug));
+    if (AG.slug !== slug) return;
+    AG.data = d;
+    renderAgentDrawer();
+  } catch (e) {
+    if (AG.slug !== slug) return;
+    // The discovery backend may not be deployed yet; the drawer must say so
+    // instead of pretending every skill is absent.
+    $("#ad-body").innerHTML = `<div class="empty">skills and plugins are not available for <code>${esc(slug)}</code> yet.</div>
+      <div class="ad-disc">The server answered: ${esc(e.message)}. This board expects <code>GET /api/agents/&lt;slug&gt;</code> with a <code>toggles</code> payload and <code>PATCH /api/agents/&lt;slug&gt;/toggles</code>. The plugin profile field in the Agents dialog still saves.</div>`;
+  }
+}
+
+function toggleRow(kind, item, mode) {
+  const origin = item.origin || "explicit";
+  const unavailable = origin === "unavailable";
+  const checked = !unavailable && item.enabled !== false;
+  const disabled = unavailable || mode === "inherit";
+  const reason = item.reason || (unavailable ? "declared but not installed" : "");
+  return `<label class="tgl ${esc(origin)}${disabled ? " ro" : ""}" title="${esc(reason || item.name)}">
+    <input type="checkbox" data-kind="${kind}" data-name="${esc(item.name)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}>
+    <span class="nm">${esc(item.name)}</span>
+    <span class="badge b-${esc(origin)}">${esc(origin === "inherit" ? "inherited" : origin)}</span>
+    ${reason ? `<span class="why">${esc(reason)}</span>` : ""}
+  </label>`;
+}
+
+function discoveryLine(disc) {
+  const bits = [];
+  if (disc.skills_at) bits.push(`skills <code>${esc(disc.skills_at)}</code>`);
+  if (disc.plugins_at) bits.push(`plugins <code>${esc(disc.plugins_at)}</code>`);
+  if (disc.skills_source) bits.push(`source <code>${esc(disc.skills_source)}</code>`);
+  return `<div class="ad-disc">cached discovery${bits.length ? " · " + bits.join(" · ") : ""}${disc.stale ? ` <span class="badge b-stale">stale · refresh</span>` : ""}</div>`;
+}
+
+function lastRunBlock(last) {
+  if (!last) return `<div class="ad-run"><span class="dim">last run: honoured unknown · no recorded run for this agent</span></div>`;
+  const label = last.honoured === true ? "yes" : last.honoured === false ? "no" : "unknown";
+  let evidence = last.evidence;
+  if (typeof evidence === "string") evidence = evidence.split("\n").filter(l => l.trim());
+  if (!Array.isArray(evidence)) evidence = [];
+  return `<div class="ad-run">
+    <span>last run honoured the selection: <b class="ad-honoured ${label}">${label}</b>${last.at ? ` <span class="dim">· ${esc(ago(last.at))}</span>` : ""}</span>
+    ${last.reason ? `<span class="dim">${esc(last.reason)}</span>` : ""}
+    ${evidence.length ? `<details><summary>evidence (${evidence.length} line${evidence.length===1?"":"s"})</summary><pre class="ad-evidence">${esc(evidence.join("\n"))}</pre></details>` : `<span class="dim">no evidence lines recorded</span>`}
+  </div>`;
+}
+
+function renderAgentDrawer() {
+  const d = AG.data || {};
+  const a = d.agent || {};
+  const t = d.toggles || {};
+  const mode = t.mode === "inherit" ? "inherit" : "explicit";
+  AG.mode = mode;
+  const skills = Array.isArray(t.skills) ? t.skills : [];
+  const plugins = Array.isArray(t.plugins) ? t.plugins : [];
+  const sec = (title, kind, items) => `<div class="ad-sec">
+      <div class="sec">${title} <span class="hint">· ${items.length} discovered</span></div>
+      ${items.length ? `<div class="tgl-list">${items.map(i => toggleRow(kind, i, mode)).join("")}</div>` : `<div class="empty">none discovered</div>`}
+    </div>`;
+  $("#ad-ref").textContent = (a.slug || AG.slug || "") + (a.division_slug ? " · " + a.division_slug : "");
+  $("#ad-title").textContent = (a.name || a.slug || AG.slug) + " · skills & plugins";
+  $("#ad-body").innerHTML = `
+    <div class="ad-mode">
+      <label for="ad-mode">selection mode</label>
+      <select id="ad-mode">
+        <option value="inherit"${mode === "inherit" ? " selected" : ""}>inherit — follow the shared set</option>
+        <option value="explicit"${mode === "explicit" ? " selected" : ""}>explicit — choose for this agent</option>
+      </select>
+      ${a.plugin_profile ? `<span class="badge">plugin profile · ${esc(a.plugin_profile)}</span>` : ""}
+      <span class="ad-note">Per-agent relevance: "a web development frontend skill is not required for a 3D game". In inherit mode the boxes are read-only and show what this agent currently gets.</span>
+    </div>
+    ${discoveryLine(t.discovery || {})}
+    ${sec("Skills", "skills", skills)}
+    ${sec("Plugins", "plugins", plugins)}
+    <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap">
+      <button class="btn small" id="ad-save">Save selection</button>
+      <button class="btn small ghost" id="ad-refresh" title="Re-read discovery from disk without reloading the page">Refresh discovery</button>
+    </div>
+    <div class="ad-status" id="ad-status"></div>
+    <div class="ad-valid" id="ad-valid"></div>
+    ${lastRunBlock(d.last_run)}
+    <div class="ad-disc">plugin profile is edited in the Agents dialog (⋯ in the rail) and still saves there.</div>`;
+
+  $("#ad-close").onclick = closeAgentDrawer;
+  $("#ad-mode").onchange = (e) => onAgentModeChange(e.target.value);
+  $("#ad-save").onclick = saveAgentToggles;
+  $("#ad-refresh").onclick = refreshDiscovery;
+}
+
+function onAgentModeChange(mode) {
+  const wasInherit = AG.mode === "inherit";
+  AG.mode = mode;
+  $("#ad-body").querySelectorAll(".tgl").forEach(row => {
+    const box = row.querySelector("input");
+    if (row.classList.contains("unavailable")) return;   // never let a missing item look selected
+    if (mode === "explicit") {
+      box.disabled = false;
+      row.classList.remove("ro");
+      // seed from the effective inherited set, so explicit never starts empty
+      if (wasInherit) box.checked = true;
+    } else {
+      box.disabled = true;
+      row.classList.add("ro");
+    }
+  });
+  const st = $("#ad-status");
+  if (st) {
+    st.className = "ad-status";
+    st.textContent = mode === "explicit"
+      ? "explicit mode: untick anything this agent does not need, then save."
+      : "inherit mode: save to follow the shared set again.";
+  }
+}
+
+async function saveAgentToggles() {
+  const slug = AG.slug;
+  if (!slug || AG.busy) return;
+  const mode = $("#ad-mode").value;
+  const picked = (kind) => [...$("#ad-body").querySelectorAll(`input[data-kind="${kind}"]:checked`)]
+    .filter(i => !i.closest(".unavailable")).map(i => i.dataset.name);
+  const body = { mode, skills: picked("skills"), plugins: picked("plugins") };
+  AG.busy = true;
+  const btn = $("#ad-save"), st = $("#ad-status"), validEl = $("#ad-valid");
+  btn.disabled = true; st.className = "ad-status"; st.textContent = "saving…"; validEl.innerHTML = "";
+  const okMsg = `saved · ${mode}${mode === "explicit" ? ` · ${body.skills.length} skills, ${body.plugins.length} plugins` : ""}`;
+  try {
+    await api("/api/agents/" + encodeURIComponent(slug) + "/toggles", { method: "PATCH", body });
+    toast("skills & plugins saved");
+    await loadAgentDetail();
+    const after = $("#ad-status");
+    if (after) { after.className = "ad-status ok"; after.textContent = okMsg; }
+  } catch (e) {
+    st.className = "ad-status bad";
+    st.textContent = e.message;
+    if (e.status === 400) renderValidOptions(e.data || {}, validEl);
+    toast(e.message, true);
+  } finally {
+    AG.busy = false;
+    const b = $("#ad-save"); if (b) b.disabled = false;
+  }
+}
+
+function renderValidOptions(data, el) {
+  const groups = [];
+  if (Array.isArray(data.valid)) groups.push(["valid", data.valid]);
+  if (Array.isArray(data.allowed)) groups.push(["valid", data.allowed]);
+  if (Array.isArray(data.valid_skills)) groups.push(["valid skills", data.valid_skills]);
+  if (Array.isArray(data.valid_plugins)) groups.push(["valid plugins", data.valid_plugins]);
+  if (!groups.length) {
+    el.innerHTML = `<div>the server rejected the selection and listed no valid options.</div>`;
+    return;
+  }
+  const name = (x) => typeof x === "string" ? x : ((x && x.name) || JSON.stringify(x));
+  el.innerHTML = groups.map(([label, list]) =>
+    `<div>${esc(label)}: ${list.length ? list.map(x => `<code>${esc(name(x))}</code>`).join(" ") : `<span class="dim">none</span>`}</div>`
+  ).join("");
+}
+
+async function refreshDiscovery() {
+  const slug = AG.slug;
+  if (!slug || AG.busy) return;
+  const btn = $("#ad-refresh"), st = $("#ad-status");
+  AG.busy = true;
+  if (btn) { btn.disabled = true; btn.textContent = "refreshing discovery…"; }
+  if (st) { st.className = "ad-status"; st.textContent = "re-reading skill and plugin directories…"; }
+  try {
+    await api("/api/discovery/refresh", { method: "POST" });
+    await loadAgentDetail();
+    const s2 = $("#ad-status");
+    if (s2) { s2.className = "ad-status ok"; s2.textContent = "discovery refreshed"; }
+  } catch (e) {
+    if (st) { st.className = "ad-status bad"; st.textContent = e.message; }
+    toast(e.message, true);
+  } finally {
+    AG.busy = false;
+    const b = $("#ad-refresh");
+    if (b) { b.disabled = false; b.textContent = "Refresh discovery"; }
+  }
 }
 
 function addDivisionModal() {
@@ -1139,7 +1408,11 @@ document.addEventListener("click", (e) => {
   if (ref) { e.preventDefault(); openTicket(ref.dataset.ref); return; }
   if (e.target.id === "focus-wrap") closeFocus();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeFocus(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if ($("#agent-drawer").classList.contains("show")) { closeAgentDrawer(); return; }
+  closeFocus();
+});
 
 // drawer width: drag the left edge, remember it, double-click to go full width
 const DRW_KEY = "bureau_drawer_w";
