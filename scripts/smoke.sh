@@ -101,13 +101,15 @@ assert_page() {
     'Bureau' \
     'id="agent-drawer"' \
     'Skills &amp; plugins' \
-    'Plugins' \
-    'renderAgentDrawer' \
-    '/api/discovery/refresh' \
-    '/toggles' \
+    'renderToggleSection' \
+    'data-save' \
+    'Save ${kind}' \
+    'Global defaults' \
+    'Generated profile' \
+    '/api/agents/' \
+    '/skills' \
     'plugin_profile' \
-    'warmTries' \
-    'discovery is still loading' \
+    'inherit' \
     'setInterval(() => { if (!document.hidden) load(); }, 4000)' \
   ; do
     grep -Fq "$needle" "$html" || fail "board page is missing: $needle"
@@ -232,6 +234,22 @@ call PUT "/api/agents/spark/toggles" \
   '{"mode":"explicit","skills":["definitely-not-a-skill"],"plugins":[]}'
 [ "$CODE" = 400 ] || fail "unknown skill after restart returned $CODE, expected 400"
 echo "smoke: unknown skill still rejected with 400 after restart"
+
+# ---------------------------------------------------------------- per-agent skills API
+call GET "/api/catalog"
+[ "$CODE" = 200 ] || fail "GET /api/catalog returned $CODE: $(cat "$BODY")"
+json_is "catalog lost the fixture skill" \
+  '.skills[] | select(.name == "smoke-skill") | .source == "~/.config/opencode/skills" and .default_enabled == true'
+call PUT "/api/agents/spark/skills" \
+  '{"skills":[{"name":"smoke-skill","enabled":false}],"plugins":[]}'
+[ "$CODE" = 200 ] || fail "PUT /api/agents/spark/skills returned $CODE: $(cat "$BODY")"
+json_is "skills PUT did not store the explicit off" \
+  '.skills[] | select(.name == "smoke-skill") | .enabled == false and .origin == "override"'
+call GET "/api/agents/spark/skills"
+[ "$CODE" = 200 ] || fail "GET /api/agents/spark/skills returned $CODE"
+json_is "saved skill state did not survive a re-read" \
+  '.skills[] | select(.name == "smoke-skill") | .enabled == false and .origin == "override"'
+echo "smoke: catalog and per-agent skills round-trip"
 
 # ---------------------------------------------------------------- plugin_profile
 call PATCH "/api/agents/spark" '{"plugin_profile":"smoke-profile"}'

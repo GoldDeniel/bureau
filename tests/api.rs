@@ -193,11 +193,13 @@ async fn board_ui_keeps_persistence_and_poll_contracts() {
         "agent-drawer",              // skills & plugins drawer exists
         "Skills &amp; plugins",      // drawer heading
         "renderAgentDrawer",         // drawer render path
-        "/api/discovery/refresh",    // explicit refresh button
-        "/toggles",                  // save target
+        "renderToggleSection",       // drawer renders per-agent toggles
+        "data-save",                 // toggles save target
+        "Global defaults",           // inherit choice in the drawer
+        "Generated profile",        // explicit generated-profile choice
         "plugin_profile",            // old agent profile field still in the editor
-        "warmTries",                 // drawer retries while discovery warms
-        "discovery is still loading", // save is blocked during the warm-up window
+        "inherit",                   // inherit is selectable, not implicit
+        "/skills",                   // per-agent skills endpoint
     ] {
         assert!(html.contains(needle), "board is missing `{needle}`");
     }

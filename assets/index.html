@@ -90,6 +90,9 @@
   .agent-row .slug{color:var(--txt);font-family:ui-monospace,monospace;font-size:11px}
   .agent-row .ad{margin-left:auto;font-size:10px;color:var(--dim);border:1px solid var(--line);padding:0 5px;border-radius:5px}
   .agent-row .prof{font-size:9.5px;color:#b8c4e0;border:1px solid #2c3752;background:#151b29;padding:0 5px;border-radius:5px;white-space:nowrap}
+  .agent-row .sel{font-size:9.5px;color:#9fb0d8;border:1px solid #2c3752;background:#111726;padding:0 5px;border-radius:5px;white-space:nowrap}
+  .agent-row[data-agent]{cursor:pointer;border-radius:6px}
+  .agent-row[data-agent]:hover{background:#141a27}
   .st{width:6px;height:6px;border-radius:50%;background:#3a4152;flex:none}
   .st.running{background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse 1.2s infinite}
   .st.idle{background:#4b556b}
@@ -233,7 +236,11 @@
   .tgl.unavailable{border-color:#40232a}
   .tgl .nm{font-family:ui-monospace,monospace;color:#c3cce4;overflow-wrap:anywhere}
   .tgl .badge{margin-left:auto}
+  .tgl .desc{margin-left:auto;color:var(--dim);font-size:10.5px;max-width:56%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tgl .badge + .desc{margin-left:6px}
   .tgl .why{color:#d99a9a;font-size:10.5px;text-align:right}
+  .tgl-grp{font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:#4d566b;margin:5px 0 -2px}
+  .ad-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
   .badge{font-size:9.5px;letter-spacing:.04em;border:1px solid var(--line);border-radius:5px;padding:0 5px;color:var(--mut);background:#151a26;white-space:nowrap}
   .b-inherited{color:#93a4c9;border-color:#2b3550;background:#161b2a}
   .b-explicit{color:#86efac;border-color:#234132;background:#101d16}
@@ -311,6 +318,7 @@
     .agents-mini{flex-direction:row;flex:none;gap:6px}
     .agent-row{flex:none;background:#12151d;border:1px solid var(--line);border-radius:20px;padding:4px 8px;font-size:11px}
     .agent-row .ad{display:none}
+    .agent-row .sel{display:none}
     .agent-row span:nth-child(3){display:none}
     .rail-foot{display:none}
     main{min-height:0}
@@ -529,6 +537,32 @@ function toast(msg, err=false) {
   setTimeout(() => el.remove(), 3000);
 }
 
+/* ---------------- per-agent enablement summary ---------------- */
+// One small badge per rail agent: enabled skills + plugins out of the catalog.
+// Loaded once per slug until a save updates it, so the 4 s poll stays cheap.
+const SUMMARY = new Map(), SUMMARY_PENDING = new Set();
+function summarize(data) {
+  const count = (list) => {
+    const items = Array.isArray(list) ? list : [];
+    return { on: items.filter(i => i.enabled && i.origin !== "unavailable").length, total: items.length };
+  };
+  return { skills: count(data.skills), plugins: count(data.plugins) };
+}
+function updateSummary(slug, data) {
+  SUMMARY.set(slug, summarize(data || {}));
+}
+async function refreshSummaries(agents) {
+  for (const agent of agents) {
+    const slug = agent.slug;
+    if (!slug || SUMMARY.has(slug) || SUMMARY_PENDING.has(slug)) continue;
+    SUMMARY_PENDING.add(slug);
+    api("/api/agents/" + encodeURIComponent(slug) + "/skills").then(d => {
+      updateSummary(slug, d);
+      renderRail();
+    }).catch(() => {}).finally(() => SUMMARY_PENDING.delete(slug));
+  }
+}
+
 async function load() {
   try {
     const snap = await api("/api/state");
@@ -539,6 +573,7 @@ async function load() {
     const key = JSON.stringify([snap.version, snap.divisions, snap.agents, snap.tickets, snap.stats, snap.dispatching]);
     const changed = key !== S.snapJson;
     S.snap = snap; S.snapJson = key;
+    refreshSummaries(snap.agents || []);
     if (changed) {
       const sx = scrollX, sy = scrollY;
       renderRail(); renderBoard(); renderFoot();
@@ -592,17 +627,24 @@ function renderRail() {
 
   const agents = cur ? s.agents.filter(a => a.division_id === cur.id) : s.agents;
   const shown = agents.slice(0, 8);
-  $("#agents-mini").innerHTML = shown.map(a => `
-    <div class="agent-row" title="${esc(a.role)} · ${esc(a.adapter)}">
-      <span class="st ${a.status}"></span>
+  $("#agents-mini").innerHTML = shown.map(a => {
+    const sum = SUMMARY.get(a.slug);
+    const sel = sum ? `<span class="sel" title="${sum.skills.on + sum.plugins.on} of ${sum.skills.total + sum.plugins.total} skills and plugins enabled">⚙ ${sum.skills.on + sum.plugins.on}/${sum.skills.total + sum.plugins.total}</span>` : "";
+    return `<div class="agent-row" data-agent="${esc(a.slug)}" title="${esc(a.role)} · ${esc(a.adapter)} · click for skills and plugins">
+      <span class="st ${esc(a.status)}"></span>
       <span class="slug">${esc(a.slug)}</span>
       <span>${esc(a.role === "manager" ? "manager" : "")}</span>
       <span class="ad">${esc(a.adapter)}${a.model ? " · " + esc(a.model.split(":")[0]) : ""}${a.enabled ? "" : " · off"}</span>
       ${a.plugin_profile ? `<span class="prof" title="opencode plugin profile">${esc(a.plugin_profile)}</span>` : ""}
-    </div>`).join("") + (agents.length > shown.length
+      ${sel}
+    </div>`;
+  }).join("") + (agents.length > shown.length
       ? `<div class="agent-row" style="color:#5d6579">+${agents.length - shown.length} more · <button class="btn ghost small" id="btn-more-agents" style="padding:0 4px">manage</button></div>`
       : "") || `<div class="empty">no agents</div>`;
-  const more = $("#btn-more-agents"); if (more) more.onclick = agentsModal;
+  $("#agents-mini").querySelectorAll(".agent-row[data-agent]").forEach(row => {
+    row.onclick = () => openAgent(row.dataset.agent);
+  });
+  const more = $("#btn-more-agents"); if (more) more.onclick = (e) => { e.stopPropagation(); agentsModal(); };
   renderLive(s.live || []);
 }
 
@@ -1022,12 +1064,13 @@ async function agentsModal() {
           <select class="f-adapter">${s.adapters.map(x => `<option ${x===a.adapter?"selected":""}>${x}</option>`).join("")}</select>
           <input class="f-model" value="${esc(a.model)}" placeholder="model / command" title="model, or shell command with {{prompt}}">
           <input type="checkbox" class="f-enabled" ${a.enabled?"checked":""} title="enabled">
-          <input class="f-profile" value="${esc(a.plugin_profile)}" ${hasProfiles ? `list="profile-list" placeholder="plugin profile · blank = global"` : `disabled placeholder="plugin profile · unavailable"`} title="${hasProfiles ? "opencode plugin profile — blank or none = global behaviour" : "this server does not expose plugin profiles"}">
+          <input class="f-profile" value="${esc(a.plugin_profile)}" ${hasProfiles ? `list="profile-list" placeholder="inherit (blank) = global config"` : `disabled placeholder="plugin profile · unavailable"`} title="${hasProfiles ? "opencode plugin profile — blank = inherit: use the global config as-is" : "this server does not expose plugin profiles"}">
           <button class="btn ghost danger ag-del" title="Delete agent" aria-label="Delete agent ${esc(a.slug)}">×</button>
         </div>`).join("") || `<div class="empty">no agents</div>`}</div>`;
   }).join("");
 
-  openModal(`<h3>Agents</h3><p class="sub">Adapters: demo (no model), ollama (local), hermes, opencode, shell (command in model field), echo.${hasProfiles ? " Plugin profile: an opencode profile name; blank or none = global behaviour." : ""}</p>
+  openModal(`<h3>Agents</h3><p class="sub">Adapters: demo (no model), ollama (local), hermes, opencode, shell (command in model field), echo.${hasProfiles ? " Plugin profile: a named opencode profile. Blank = inherit — use the global config as-is; it is never required." : ""}</p>
+    <p class="sub" style="margin-top:-8px">Click an agent's <b>skills ⚙</b> to tick the skills and plugins it needs. Each section saves on its own.</p>
     ${profileList}
     ${group}
     <div class="agents-tbl" style="margin-top:6px"><button class="btn" id="save-agents">Save changes</button></div>
@@ -1117,12 +1160,10 @@ async function agentsModal() {
 }
 
 /* ---------------- agent skills & plugins drawer ---------------- */
-const AG = { slug:null, data:null, busy:false, mode:null, warmTimer:null, warmTries:0 };
+const AG = { slug:null, data:null, detail:null, busy:false };
 
 function closeAgentDrawer() {
-  clearTimeout(AG.warmTimer);
-  AG.slug = null; AG.data = null; AG.busy = false; AG.mode = null;
-  AG.warmTimer = null; AG.warmTries = 0;
+  AG.slug = null; AG.data = null; AG.detail = null; AG.busy = false;
   $("#agent-drawer").classList.remove("show");
   if ($("#drawer").classList.contains("show")) {
     $("#backdrop").classList.add("show");
@@ -1133,9 +1174,7 @@ function closeAgentDrawer() {
 }
 
 async function openAgent(slug) {
-  clearTimeout(AG.warmTimer);
-  AG.slug = slug; AG.data = null; AG.busy = false; AG.mode = null;
-  AG.warmTimer = null; AG.warmTries = 0;
+  AG.slug = slug; AG.data = null; AG.detail = null; AG.busy = false;
   $("#agent-drawer").classList.add("show");
   $("#backdrop").classList.add("show");
   $("#backdrop").onclick = closeAgentDrawer;
@@ -1148,199 +1187,165 @@ async function openAgent(slug) {
 async function loadAgentDetail() {
   const slug = AG.slug;
   if (!slug) return;
-  try {
-    const d = await api("/api/agents/" + encodeURIComponent(slug));
-    if (AG.slug !== slug) return;
-    AG.data = d;
-    renderAgentDrawer();
-    // The first uncached read answers from an empty cache while discovery
-    // warms in the background. Retry briefly instead of leaving "none".
-    const disc = d.toggles && d.toggles.discovery;
-    if (disc && disc.skills_source === "pending" && AG.warmTries < 20) {
-      AG.warmTries++;
-      clearTimeout(AG.warmTimer);
-      AG.warmTimer = setTimeout(() => { if (AG.slug === slug) loadAgentDetail(); }, 300);
-    }
-  } catch (e) {
-    if (AG.slug !== slug) return;
-    // The discovery backend may not be deployed yet; the drawer must say so
-    // instead of pretending every skill is absent.
-    $("#ad-body").innerHTML = `<div class="empty">skills and plugins are not available for <code>${esc(slug)}</code> yet.</div>
-      <div class="ad-disc">The server answered: ${esc(e.message)}. This board expects <code>GET /api/agents/&lt;slug&gt;</code> with a <code>toggles</code> payload and <code>PATCH /api/agents/&lt;slug&gt;/toggles</code>. The plugin profile field in the Agents dialog still saves.</div>`;
+  // The detail read carries last_run evidence; the skills read is the catalog.
+  // They are independent, so a missing detail endpoint never hides the toggles.
+  const [skills, detail] = await Promise.allSettled([
+    api("/api/agents/" + encodeURIComponent(slug) + "/skills"),
+    api("/api/agents/" + encodeURIComponent(slug)),
+  ]);
+  if (AG.slug !== slug) return;
+  if (skills.status === "rejected") {
+    const e = skills.reason || {};
+    $("#ad-body").innerHTML = `<div class="empty">skills and plugins are not available for <code>${esc(slug)}</code>.</div>
+      <div class="ad-disc">The board needs <code>GET /api/agents/&lt;slug&gt;/skills</code>. The server answered: ${esc(e.message || e)}.</div>`;
+    return;
   }
+  AG.data = skills.value || {};
+  AG.detail = detail.status === "fulfilled" ? detail.value : null;
+  updateSummary(slug, AG.data);
+  renderAgentDrawer();
 }
 
-function toggleRow(kind, item, mode) {
-  const origin = item.origin || "explicit";
-  const unavailable = origin === "unavailable";
+const SOURCE_GROUPS = [
+  ["global", "Global defaults"],
+  ["generated", "Generated profile"],
+  ["profile", "Profile"],
+  ["project", "Project"],
+  ["installed", "Installed plugins"],
+  ["other", "Other"],
+];
+function sourceGroup(source) {
+  const s = String(source || "");
+  if (s.startsWith("generated:")) return "generated";
+  if (s.startsWith("profile:")) return "profile";
+  if (s.startsWith(".opencode")) return "project";
+  if (s === "installed") return "installed";
+  if (s.startsWith("~/")) return "global";
+  return "other";
+}
+function groupLabel(key, items) {
+  const label = (SOURCE_GROUPS.find(g => g[0] === key) || ["", "Other"])[1];
+  if (key === "generated" || key === "profile") {
+    const suffix = String((items[0] && items[0].source) || "").split(":")[1];
+    return label + (suffix ? " · " + suffix : "");
+  }
+  return label;
+}
+function groupItems(items) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = sourceGroup(item.source);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  return SOURCE_GROUPS.filter(([key]) => groups.has(key)).map(([key]) => [key, groups.get(key)]);
+}
+function toggleRow(kind, item) {
+  const unavailable = item.origin === "unavailable";
   const checked = !unavailable && item.enabled !== false;
-  const disabled = unavailable || mode === "inherit";
-  const reason = item.reason || (unavailable ? "declared but not installed" : "");
-  return `<label class="tgl ${esc(origin)}${disabled ? " ro" : ""}" title="${esc(reason || item.name)}">
-    <input type="checkbox" data-kind="${kind}" data-name="${esc(item.name)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}>
+  const desc = item.description
+    ? `<span class="desc" title="${esc(item.description)}">${esc(item.description)}</span>`
+    : "";
+  return `<label class="tgl${unavailable ? " unavailable" : ""}" title="${esc(item.description || item.name)}">
+    <input type="checkbox" data-kind="${kind}" data-name="${esc(item.name)}" ${checked ? "checked" : ""} ${unavailable ? "disabled" : ""}>
     <span class="nm">${esc(item.name)}</span>
-    <span class="badge b-${esc(origin)}">${esc(origin === "inherit" ? "inherited" : origin)}</span>
-    ${reason ? `<span class="why">${esc(reason)}</span>` : ""}
+    ${item.origin === "override" ? `<span class="badge">changed</span>` : ""}
+    ${unavailable ? `<span class="why">${esc(item.reason || "declared but not installed")}</span>` : desc}
   </label>`;
 }
-
-function discoveryLine(disc) {
-  const bits = [];
-  if (disc.skills_at) bits.push(`skills <code>${esc(disc.skills_at)}</code>`);
-  if (disc.plugins_at) bits.push(`plugins <code>${esc(disc.plugins_at)}</code>`);
-  if (disc.skills_source) bits.push(`source <code>${esc(disc.skills_source)}</code>`);
-  return `<div class="ad-disc">cached discovery${bits.length ? " · " + bits.join(" · ") : ""}${disc.stale ? ` <span class="badge b-stale">stale · refresh</span>` : ""}</div>`;
+function renderToggleSection(title, kind, items) {
+  const list = Array.isArray(items) ? items : [];
+  const on = list.filter(i => i.enabled && i.origin !== "unavailable").length;
+  const groups = groupItems(list).map(([key, group]) =>
+    `<div class="tgl-grp">${esc(groupLabel(key, group))}</div>
+     <div class="tgl-list">${group.map(i => toggleRow(kind, i)).join("")}</div>`
+  ).join("");
+  return `<div class="ad-sec" data-section="${kind}">
+    <div class="sec">${title} <span class="hint">· ${on} of ${list.length} ${kind} enabled</span></div>
+    ${list.length ? groups : `<div class="empty">none discovered</div>`}
+    <div class="ad-row">
+      <button class="btn small" data-save="${kind}"${list.length ? "" : " disabled"}>Save ${kind}</button>
+      <span class="ad-status" id="ad-st-${kind}"></span>
+    </div>
+  </div>`;
 }
-
-function lastRunBlock(last) {
-  if (!last) return `<div class="ad-run"><span class="dim">last run: honoured unknown · no recorded run for this agent</span></div>`;
+function lastRunBlock(last, profile) {
+  const profileBit = profile ? ` <span class="badge">plugin profile · ${esc(profile)}</span>` : "";
+  if (!last) return `<div class="ad-run"><span class="dim">last run: honoured unknown · no recorded run for this agent</span>${profileBit}</div>`;
   const label = last.honoured === true ? "yes" : last.honoured === false ? "no" : "unknown";
   let evidence = last.evidence;
   if (typeof evidence === "string") evidence = evidence.split("\n").filter(l => l.trim());
   if (!Array.isArray(evidence)) evidence = [];
   return `<div class="ad-run">
-    <span>last run honoured the selection: <b class="ad-honoured ${label}">${label}</b>${last.at ? ` <span class="dim">· ${esc(ago(last.at))}</span>` : ""}</span>
+    <span>last run honoured the selection: <b class="ad-honoured ${label}">${label}</b>${last.at ? ` <span class="dim">· ${esc(ago(last.at))}</span>` : ""}${profileBit}</span>
     ${last.reason ? `<span class="dim">${esc(last.reason)}</span>` : ""}
     ${evidence.length ? `<details><summary>evidence (${evidence.length} line${evidence.length===1?"":"s"})</summary><pre class="ad-evidence">${esc(evidence.join("\n"))}</pre></details>` : `<span class="dim">no evidence lines recorded</span>`}
   </div>`;
 }
-
 function renderAgentDrawer() {
   const d = AG.data || {};
-  const a = d.agent || {};
-  const t = d.toggles || {};
-  const mode = t.mode === "inherit" ? "inherit" : "explicit";
-  AG.mode = mode;
-  const skills = Array.isArray(t.skills) ? t.skills : [];
-  const plugins = Array.isArray(t.plugins) ? t.plugins : [];
-  const warm = t.discovery && t.discovery.skills_source === "pending";
-  const sec = (title, kind, items) => `<div class="ad-sec">
-      <div class="sec">${title} <span class="hint">· ${items.length} discovered</span></div>
-      ${items.length ? `<div class="tgl-list">${items.map(i => toggleRow(kind, i, mode)).join("")}</div>` : `<div class="empty">${warm ? "discovering…" : "none discovered"}</div>`}
-    </div>`;
+  const detail = AG.detail || {};
+  const a = detail.agent || {};
   $("#ad-ref").textContent = (a.slug || AG.slug || "") + (a.division_slug ? " · " + a.division_slug : "");
   $("#ad-title").textContent = (a.name || a.slug || AG.slug) + " · skills & plugins";
   $("#ad-body").innerHTML = `
     <div class="ad-mode">
-      <label for="ad-mode">selection mode</label>
-      <select id="ad-mode">
-        <option value="inherit"${mode === "inherit" ? " selected" : ""}>inherit — follow the shared set</option>
-        <option value="explicit"${mode === "explicit" ? " selected" : ""}>explicit — choose for this agent</option>
-      </select>
-      ${a.plugin_profile ? `<span class="badge">plugin profile · ${esc(a.plugin_profile)}</span>` : ""}
-      <span class="ad-note">Per-agent relevance: "a web development frontend skill is not required for a 3D game". In inherit mode the boxes are read-only and show what this agent currently gets.</span>
+      <span class="ad-note">Per-agent relevance: "a web development frontend skill is not required for a 3D game". Tick what this agent needs, then save each section.</span>
     </div>
-    ${discoveryLine(t.discovery || {})}
-    ${sec("Skills", "skills", skills)}
-    ${sec("Plugins", "plugins", plugins)}
-    <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap">
-      <button class="btn small" id="ad-save"${warm ? " disabled" : ""}>Save selection</button>
-      <button class="btn small ghost" id="ad-refresh" title="Re-read discovery from disk without reloading the page">Refresh discovery</button>
-    </div>
-    <div class="ad-status" id="ad-status"></div>
-    <div class="ad-valid" id="ad-valid"></div>
-    ${lastRunBlock(d.last_run)}
-    <div class="ad-disc">plugin profile is edited in the Agents dialog (⋯ in the rail) and still saves there.</div>`;
+    ${d.reason ? `<div class="ad-disc">${esc(d.reason)}</div>` : ""}
+    ${renderToggleSection("Skills", "skills", d.skills)}
+    ${renderToggleSection("Plugins", "plugins", d.plugins)}
+    ${lastRunBlock(detail.last_run, a.plugin_profile)}
+    <div class="ad-disc">plugin profile is edited in the Agents dialog (⋯ in the rail). Blank means inherit: use the global config as-is.</div>`;
 
   $("#ad-close").onclick = closeAgentDrawer;
-  $("#ad-mode").onchange = (e) => onAgentModeChange(e.target.value);
-  $("#ad-save").onclick = saveAgentToggles;
-  $("#ad-refresh").onclick = refreshDiscovery;
-}
-
-function onAgentModeChange(mode) {
-  const wasInherit = AG.mode === "inherit";
-  AG.mode = mode;
-  $("#ad-body").querySelectorAll(".tgl").forEach(row => {
-    const box = row.querySelector("input");
-    if (row.classList.contains("unavailable")) return;   // never let a missing item look selected
-    if (mode === "explicit") {
-      box.disabled = false;
-      row.classList.remove("ro");
-      // seed from the effective inherited set, so explicit never starts empty
-      if (wasInherit) box.checked = true;
-    } else {
-      box.disabled = true;
-      row.classList.add("ro");
-    }
+  $("#ad-body").querySelectorAll("[data-save]").forEach(btn => {
+    btn.onclick = () => saveSection(btn.dataset.save);
   });
-  const st = $("#ad-status");
-  if (st) {
-    st.className = "ad-status";
-    st.textContent = mode === "explicit"
-      ? "explicit mode: untick anything this agent does not need, then save."
-      : "inherit mode: save to follow the shared set again.";
-  }
 }
 
-async function saveAgentToggles() {
+async function saveSection(kind) {
   const slug = AG.slug;
-  if (!slug || AG.busy) return;
-  const disc = AG.data && AG.data.toggles && AG.data.toggles.discovery;
-  if (disc && disc.skills_source === "pending") {
-    toast("discovery is still loading", true);
-    return;
-  }
-  const mode = $("#ad-mode").value;
-  const picked = (kind) => [...$("#ad-body").querySelectorAll(`input[data-kind="${kind}"]:checked`)]
-    .filter(i => !i.closest(".unavailable")).map(i => i.dataset.name);
-  const body = { mode, skills: picked("skills"), plugins: picked("plugins") };
+  if (!slug || AG.busy || !AG.data) return;
+  const rows = [...$("#ad-body").querySelectorAll(`input[data-kind="${kind}"]`)]
+    .filter(input => !input.closest(".unavailable"));
+  const payload = rows.map(input => ({ name: input.dataset.name, enabled: input.checked }));
+  if (!payload.length) return;
+  // The last state the server confirmed, for rollback when the save fails.
+  const before = new Map((AG.data[kind] || []).map(item => [item.name, item.enabled !== false]));
   AG.busy = true;
-  const btn = $("#ad-save"), st = $("#ad-status"), validEl = $("#ad-valid");
-  btn.disabled = true; st.className = "ad-status"; st.textContent = "saving…"; validEl.innerHTML = "";
-  const okMsg = `saved · ${mode}${mode === "explicit" ? ` · ${body.skills.length} skills, ${body.plugins.length} plugins` : ""}`;
+  const buttons = [...$("#ad-body").querySelectorAll("[data-save]")];
+  buttons.forEach(b => b.disabled = true);
+  const status = $("#ad-st-" + kind);
+  if (status) { status.className = "ad-status"; status.textContent = "saving…"; }
   try {
-    await api("/api/agents/" + encodeURIComponent(slug) + "/toggles", { method: "PATCH", body });
-    toast("skills & plugins saved");
-    await loadAgentDetail();
-    const after = $("#ad-status");
-    if (after) { after.className = "ad-status ok"; after.textContent = okMsg; }
+    const body = kind === "skills" ? { skills: payload } : { plugins: payload };
+    const res = await api("/api/agents/" + encodeURIComponent(slug) + "/skills", { method: "PUT", body });
+    if (AG.slug !== slug) return;
+    AG.data = { ...AG.data, skills: res.skills || [], plugins: res.plugins || [], reason: res.reason || null };
+    updateSummary(slug, AG.data);
+    renderAgentDrawer();
+    renderRail();
+    const after = $("#ad-st-" + kind);
+    if (after) { after.className = "ad-status ok"; after.textContent = "saved"; }
+    toast(`${kind} saved`);
+    load();   // refresh the agent card from the server after the save
   } catch (e) {
-    st.className = "ad-status bad";
-    st.textContent = e.message;
-    if (e.status === 400) renderValidOptions(e.data || {}, validEl);
-    toast(e.message, true);
-  } finally {
-    AG.busy = false;
-    const b = $("#ad-save"); if (b) b.disabled = false;
-  }
-}
-
-function renderValidOptions(data, el) {
-  const groups = [];
-  if (Array.isArray(data.valid)) groups.push(["valid", data.valid]);
-  if (Array.isArray(data.allowed)) groups.push(["valid", data.allowed]);
-  if (Array.isArray(data.valid_skills)) groups.push(["valid skills", data.valid_skills]);
-  if (Array.isArray(data.valid_plugins)) groups.push(["valid plugins", data.valid_plugins]);
-  if (!groups.length) {
-    el.innerHTML = `<div>the server rejected the selection and listed no valid options.</div>`;
-    return;
-  }
-  const name = (x) => typeof x === "string" ? x : ((x && x.name) || JSON.stringify(x));
-  el.innerHTML = groups.map(([label, list]) =>
-    `<div>${esc(label)}: ${list.length ? list.map(x => `<code>${esc(name(x))}</code>`).join(" ") : `<span class="dim">none</span>`}</div>`
-  ).join("");
-}
-
-async function refreshDiscovery() {
-  const slug = AG.slug;
-  if (!slug || AG.busy) return;
-  const btn = $("#ad-refresh"), st = $("#ad-status");
-  AG.busy = true;
-  if (btn) { btn.disabled = true; btn.textContent = "refreshing discovery…"; }
-  if (st) { st.className = "ad-status"; st.textContent = "re-reading skill and plugin directories…"; }
-  try {
-    await api("/api/discovery/refresh", { method: "POST" });
-    await loadAgentDetail();
-    const s2 = $("#ad-status");
-    if (s2) { s2.className = "ad-status ok"; s2.textContent = "discovery refreshed"; }
-  } catch (e) {
+    if (AG.slug !== slug) return;
+    // Roll the optimistic ticks back to the last state the server confirmed.
+    $("#ad-body").querySelectorAll(`input[data-kind="${kind}"]`).forEach(input => {
+      if (!input.closest(".unavailable") && before.has(input.dataset.name)) input.checked = before.get(input.dataset.name);
+    });
+    const st = $("#ad-st-" + kind);
     if (st) { st.className = "ad-status bad"; st.textContent = e.message; }
     toast(e.message, true);
   } finally {
-    AG.busy = false;
-    const b = $("#ad-refresh");
-    if (b) { b.disabled = false; b.textContent = "Refresh discovery"; }
+    if (AG.slug === slug) {
+      AG.busy = false;
+      [...$("#ad-body").querySelectorAll("[data-save]")].forEach(b => {
+        b.disabled = !b.closest(".ad-sec").querySelector(".tgl");
+      });
+    }
   }
 }
 
