@@ -922,6 +922,7 @@ mod tests {
             adapter: "demo".into(),
             model: String::new(),
             system_hint: String::new(),
+            plugin_profile: None,
             created_at: String::new(),
             enabled: true,
             status: "idle".into(),

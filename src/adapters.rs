@@ -172,6 +172,16 @@ fn resolve_bin(name: &str) -> String {
     name.to_string()
 }
 
+/// Extra child env for the opencode adapter. A profile replaces opencode's whole
+/// XDG config dir, so only that profile's opencode.json is read.
+fn plugin_env(
+    profile: Option<&str>,
+    root: &std::path::Path,
+) -> Option<(&'static str, std::path::PathBuf)> {
+    let name = profile?.trim();
+    (!name.is_empty()).then(|| ("XDG_CONFIG_HOME", root.join(name)))
+}
+
 async fn run_cmd(
     bin: &str,
     args: &[String],
@@ -193,6 +203,13 @@ async fn run_cmd(
             "BUREAU_DIVISION",
             agent.division_slug.clone().unwrap_or_default(),
         );
+    // None leaves XDG_CONFIG_HOME alone: the child keeps today's global config.
+    if agent.adapter == "opencode"
+        && let Some(root) = crate::db::profiles_dir()
+        && let Some((key, value)) = plugin_env(agent.plugin_profile.as_deref(), &root)
+    {
+        cmd.env(key, value);
+    }
     if let Some(dir) = cwd
         && !dir.is_empty()
     {
@@ -429,10 +446,22 @@ mod tests {
             adapter: adapter.into(),
             model: String::new(),
             system_hint: String::new(),
+            plugin_profile: None,
             enabled: true,
             status: "idle".into(),
             created_at: String::new(),
         }
+    }
+
+    #[test]
+    fn opencode_plugin_profile_sets_xdg_config_home() {
+        let root = std::path::Path::new("/home/ada/.config/opencode/profiles");
+        assert_eq!(plugin_env(None, root), None, "NULL profile must not touch XDG_CONFIG_HOME");
+        assert_eq!(plugin_env(Some(""), root), None);
+        assert_eq!(
+            plugin_env(Some("worker-lite"), root).unwrap().1,
+            std::path::PathBuf::from("/home/ada/.config/opencode/profiles/worker-lite")
+        );
     }
 
     #[test]

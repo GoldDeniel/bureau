@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS agents (
     adapter     TEXT NOT NULL DEFAULT 'demo',
     model       TEXT NOT NULL DEFAULT '',
     system_hint TEXT NOT NULL DEFAULT '',
+    plugin_profile TEXT,
     enabled     INTEGER NOT NULL DEFAULT 1,
     status      TEXT NOT NULL DEFAULT 'idle',
     created_at  TEXT NOT NULL
@@ -104,6 +105,7 @@ pub fn open(path: &str) -> Result<Db> {
     let conn = Connection::open(path).with_context(|| format!("opening {path}"))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch(SCHEMA)?;
+    // Databases created before the column existed; SQLite has no ADD COLUMN IF NOT EXISTS.
     // Added after the first schema: CREATE TABLE IF NOT EXISTS does not touch an
     // existing table, so older databases need the column added explicitly.
     let has_paused: i64 = conn.query_row(
@@ -116,6 +118,9 @@ pub fn open(path: &str) -> Result<Db> {
             "ALTER TABLE divisions ADD COLUMN paused INTEGER NOT NULL DEFAULT 0",
         )?;
     }
+    if !has_column(&conn, "agents", "plugin_profile")? {
+        conn.execute("ALTER TABLE agents ADD COLUMN plugin_profile TEXT", [])?;
+    }
     // A crash leaves agents marked running; nothing can actually be running at boot.
     conn.execute("UPDATE agents SET status='idle' WHERE status='running'", [])?;
     conn.execute(
@@ -124,6 +129,17 @@ pub fn open(path: &str) -> Result<Db> {
         [],
     )?;
     Ok(Arc::new(Mutex::new(conn)))
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // ---------------------------------------------------------------- models
@@ -148,6 +164,7 @@ pub struct Agent {
     pub model: String,
     #[serde(skip_serializing)]
     pub system_hint: String,
+    pub plugin_profile: Option<String>,
     pub enabled: bool,
     pub status: String,
     pub created_at: String,
@@ -301,7 +318,7 @@ fn map_ticket(row: &Row) -> rusqlite::Result<Ticket> {
 
 const AGENT_SELECT: &str = r#"
 SELECT a.id, a.slug, a.name, a.role, a.division_id, d.slug, a.adapter, a.model,
-       a.system_hint, a.enabled, a.status, a.created_at
+       a.system_hint, a.enabled, a.status, a.created_at, a.plugin_profile
 FROM agents a LEFT JOIN divisions d ON d.id = a.division_id
 "#;
 
@@ -319,6 +336,7 @@ fn map_agent(row: &Row) -> rusqlite::Result<Agent> {
         enabled: row.get::<_, i64>(9)? != 0,
         status: row.get(10)?,
         created_at: row.get(11)?,
+        plugin_profile: row.get(12)?,
     })
 }
 
@@ -490,9 +508,65 @@ pub struct AgentPatch {
     pub adapter: Option<String>,
     pub model: Option<String>,
     pub system_hint: Option<String>,
+    /// A present `null` clears the profile. A missing key must leave it alone,
+    /// and serde calls this only when the key is there.
+    #[serde(default, deserialize_with = "null_clears")]
+    pub plugin_profile: Option<String>,
     pub enabled: Option<bool>,
     pub role: Option<String>,
     pub division: Option<String>,
+}
+
+fn null_clears<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<String>, D::Error> {
+    Ok(Option::<String>::deserialize(de)?.or_else(|| Some("none".into())))
+}
+
+/// Profile names an agent may use: directories under $BUREAU_PROFILES_DIR (or
+/// ~/.config/opencode/profiles) that hold an opencode.json.
+pub fn profiles_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("BUREAU_PROFILES_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| std::path::PathBuf::from(home).join(".config/opencode/profiles"))
+        })
+}
+
+pub fn plugin_profiles() -> Vec<String> {
+    let Some(dir) = profiles_dir() else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            let dir = entry.path();
+            dir.join("opencode.json").is_file() || dir.join("opencode/opencode.json").is_file()
+        })
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    names
+}
+
+/// `Ok(None)` clears the profile. Anything else must name a real profile.
+pub fn validate_plugin_profile(name: &str) -> Result<Option<String>> {
+    let name = match name.trim() {
+        "" | "none" => return Ok(None),
+        name => name,
+    };
+    let valid = plugin_profiles();
+    // A profile is a directory name, never a path.
+    if name.contains('/') || name.contains("..") || !valid.iter().any(|v| v == name) {
+        let expected = if valid.is_empty() {
+            "none found".to_string()
+        } else {
+            valid.join(", ")
+        };
+        anyhow::bail!("unknown plugin profile '{name}': expected one of {expected} (or 'none' to clear)");
+    }
+    Ok(Some(name.to_string()))
 }
 
 /// One UPDATE for every optional field, so a role change and a division move
@@ -512,6 +586,10 @@ pub fn update_agent(conn: &Connection, slug: &str, p: &AgentPatch) -> Result<()>
         ),
         None => None,
     };
+    let profile = match &p.plugin_profile {
+        Some(name) => Some(validate_plugin_profile(name)?),
+        None => None,
+    };
     let changed = conn
         .execute(
             "UPDATE agents SET
@@ -521,7 +599,8 @@ pub fn update_agent(conn: &Connection, slug: &str, p: &AgentPatch) -> Result<()>
                 system_hint = COALESCE(?4, system_hint),
                 enabled     = COALESCE(?5, enabled),
                 role        = COALESCE(?6, role),
-                division_id = COALESCE(?7, division_id)
+                division_id = COALESCE(?7, division_id),
+                plugin_profile = CASE WHEN ?9 THEN ?10 ELSE plugin_profile END
              WHERE slug = ?8",
             params![
                 &p.name,
@@ -531,7 +610,9 @@ pub fn update_agent(conn: &Connection, slug: &str, p: &AgentPatch) -> Result<()>
                 p.enabled.map(|b| b as i64),
                 &p.role,
                 division_id,
-                slug
+                slug,
+                profile.is_some(),
+                profile.flatten(),
             ],
         )
         .map_err(|e| {
@@ -1089,6 +1170,89 @@ mod tests {
         Arc::new(Mutex::new(conn))
     }
 
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("bureau-db-{tag}-{}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn old_database_gains_plugin_profile_column() {
+        let path = tmp("migrate");
+        std::fs::create_dir_all(&path).unwrap();
+        let file = path.join("old.db").to_string_lossy().into_owned();
+        {
+            let conn = Connection::open(&file).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE agents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slug TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'worker',
+                    division_id INTEGER,
+                    adapter TEXT NOT NULL DEFAULT 'demo',
+                    model TEXT NOT NULL DEFAULT '',
+                    system_hint TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'idle',
+                    created_at TEXT NOT NULL);
+                 INSERT INTO agents (slug, name, created_at)
+                 VALUES ('old', 'Old', '2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+        let db = open(&file).unwrap();
+        let conn = db.lock().unwrap();
+        assert!(has_column(&conn, "agents", "plugin_profile").unwrap());
+        assert_eq!(agent_by_slug(&conn, "old").unwrap().unwrap().plugin_profile, None);
+        drop(conn);
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    #[test]
+    fn plugin_profile_sets_clears_and_rejects_unknown_names() {
+        let profiles = tmp("profiles");
+        for name in ["worker-lite", "worker-full", "manager-bare"] {
+            let dir = profiles.join(name).join("opencode");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("opencode.json"), "{}").unwrap();
+        }
+        // SAFETY: no other unit test reads this variable.
+        unsafe { std::env::set_var("BUREAU_PROFILES_DIR", &profiles) };
+
+        let db = mem();
+        let conn = db.lock().unwrap();
+        let div = create_division(&conn, "hexa", "Hexa", "", "/tmp").unwrap();
+        create_agent(&conn, "spark", "Spark", "worker", Some(div), "opencode", "", "").unwrap();
+        let set = |name: &str| AgentPatch {
+            plugin_profile: Some(name.into()),
+            ..Default::default()
+        };
+
+        update_agent(&conn, "spark", &set("worker-lite")).unwrap();
+        assert_eq!(
+            agent_by_slug(&conn, "spark").unwrap().unwrap().plugin_profile.as_deref(),
+            Some("worker-lite")
+        );
+        update_agent(&conn, "spark", &set("none")).unwrap();
+        assert_eq!(agent_by_slug(&conn, "spark").unwrap().unwrap().plugin_profile, None);
+        update_agent(&conn, "spark", &set("worker-full")).unwrap();
+        update_agent(&conn, "spark", &set("")).unwrap();
+        assert_eq!(agent_by_slug(&conn, "spark").unwrap().unwrap().plugin_profile, None);
+
+        let err = update_agent(&conn, "spark", &set("nope")).unwrap_err().to_string();
+        assert!(
+            err.contains(
+                "unknown plugin profile 'nope': expected one of manager-bare, worker-full, worker-lite (or 'none' to clear)"
+            ),
+            "{err}"
+        );
+        drop(conn);
+        std::fs::remove_dir_all(&profiles).ok();
+    }
+
     #[test]
     fn ticket_refs_are_sequential_and_children_rollup() {
         let db = mem();
@@ -1141,7 +1305,6 @@ mod tests {
         assert!(last.contains("Ready for your review"), "{last}");
     }
 
-    #[test]
     #[test]
     fn closing_a_parent_closes_its_subtickets() {
         let db = mem();

@@ -151,6 +151,9 @@ enum AgentCmd {
         model: Option<String>,
         #[arg(long)]
         hint: Option<String>,
+        /// opencode plugin profile; `none` clears it.
+        #[arg(long)]
+        plugin_profile: Option<String>,
         #[arg(long, conflicts_with = "disable")]
         enable: bool,
         #[arg(long)]
@@ -481,17 +484,18 @@ async fn main() -> Result<()> {
                         None => None,
                     };
                     println!(
-                        "{:<10} {:<8} {:<14} {:<10} {:<24} {:<8} {:<8}",
-                        "SLUG", "ROLE", "DIVISION", "ADAPTER", "MODEL", "ENABLED", "STATUS"
+                        "{:<10} {:<8} {:<14} {:<10} {:<24} {:<14} {:<8} {:<8}",
+                        "SLUG", "ROLE", "DIVISION", "ADAPTER", "MODEL", "PROFILE", "ENABLED", "STATUS"
                     );
                     for a in db::agents(&conn, division_id)? {
                         println!(
-                            "{:<10} {:<8} {:<14} {:<10} {:<24} {:<8} {}",
+                            "{:<10} {:<8} {:<14} {:<10} {:<24} {:<14} {:<8} {}",
                             a.slug,
                             a.role,
                             a.division_slug.unwrap_or_else(|| "-".into()),
                             a.adapter,
                             if a.model.is_empty() { "-" } else { &a.model },
+                            a.plugin_profile.as_deref().unwrap_or("-"),
                             if a.enabled { "yes" } else { "no" },
                             a.status
                         );
@@ -537,6 +541,7 @@ async fn main() -> Result<()> {
                     adapter,
                     model,
                     hint,
+                    plugin_profile,
                     enable,
                     disable,
                 } => {
@@ -545,6 +550,7 @@ async fn main() -> Result<()> {
                         adapter,
                         model,
                         system_hint: hint,
+                        plugin_profile,
                         enabled: if enable {
                             Some(true)
                         } else if disable {
@@ -560,10 +566,11 @@ async fn main() -> Result<()> {
                     db::update_agent(&conn, &slug, &patch)?;
                     let a = db::agent_by_slug(&conn, &slug)?.unwrap();
                     println!(
-                        "{}: adapter={} model={} enabled={}",
+                        "{}: adapter={} model={} profile={} enabled={}",
                         a.slug,
                         a.adapter,
                         if a.model.is_empty() { "-" } else { &a.model },
+                        a.plugin_profile.as_deref().unwrap_or("-"),
                         a.enabled
                     );
                 }
