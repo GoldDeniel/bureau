@@ -6,3 +6,4 @@ pub mod discovery;
 pub mod dispatch;
 pub mod live;
 pub mod seed;
+pub mod skills;

@@ -1,8 +1,9 @@
 //! Bureau — a ticket system for a company of AI agents.
-use bureau::{api, db, dispatch, seed};
+use bureau::{api, db, dispatch, seed, skills};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -72,6 +73,57 @@ enum Cmd {
     Events {
         #[arg(short = 'n', long, default_value_t = 40)]
         limit: i64,
+    },
+    /// Copy, list, sync and uninstall the global opencode skills Bureau manages.
+    Skills {
+        #[command(subcommand)]
+        cmd: SkillsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillsCmd {
+    /// Copy named skills into the target. Dry run unless --apply is given.
+    Distribute {
+        #[arg(required = true)]
+        names: Vec<String>,
+        /// Source root to read instead of the defaults (repeatable).
+        #[arg(long = "source", value_name = "DIR")]
+        source: Vec<PathBuf>,
+        /// Install root. Defaults to ~/.agents/skills.
+        #[arg(long, value_name = "DIR")]
+        target: Option<PathBuf>,
+        /// Write changes. Without it Bureau prints the plan only (dry run).
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Show managed skills, unmanaged target directories and available sources.
+    List {
+        #[arg(long = "source", value_name = "DIR")]
+        source: Vec<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        target: Option<PathBuf>,
+    },
+    /// Re-copy every manifest skill from its recorded source. Dry run unless --apply.
+    Sync {
+        #[arg(long = "source", value_name = "DIR")]
+        source: Vec<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        target: Option<PathBuf>,
+        /// Write changes. Without it Bureau prints the plan only (dry run).
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Remove named skills Bureau installed. Dry run unless --apply is given.
+    Uninstall {
+        #[arg(required = true)]
+        names: Vec<String>,
+        /// Install root. Defaults to ~/.agents/skills.
+        #[arg(long, value_name = "DIR")]
+        target: Option<PathBuf>,
+        /// Write changes. Without it Bureau prints the plan only (dry run).
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -308,6 +360,43 @@ async fn main() -> Result<()> {
                 );
             }
         }
+        Cmd::Skills { cmd } => match cmd {
+            SkillsCmd::Distribute {
+                names,
+                source,
+                target,
+                apply,
+            } => {
+                let cfg = skills_config(source, target, apply)?;
+                let outcomes = skills::distribute(&cfg, &names)?;
+                print_outcomes(&outcomes, apply);
+            }
+            SkillsCmd::List { source, target } => {
+                let cfg = skills_config(source, target, false)?;
+                println!("{:<24} {:<10} {}", "NAME", "STATE", "SOURCE");
+                for row in skills::list(&cfg)? {
+                    println!("{:<24} {:<10} {}", row.name, row.state, row.detail);
+                }
+            }
+            SkillsCmd::Sync {
+                source,
+                target,
+                apply,
+            } => {
+                let cfg = skills_config(source, target, apply)?;
+                let outcomes = skills::sync(&cfg)?;
+                print_outcomes(&outcomes, apply);
+            }
+            SkillsCmd::Uninstall {
+                names,
+                target,
+                apply,
+            } => {
+                let cfg = skills_config(Vec::new(), target, apply)?;
+                let outcomes = skills::uninstall(&cfg, &names)?;
+                print_outcomes(&outcomes, apply);
+            }
+        },
         Cmd::Ticket { cmd } => {
             let db = db::open(&cli.db)?;
             let conn = db.lock().unwrap();
@@ -627,6 +716,34 @@ fn no_division(slug: &str, db_path: &str) -> String {
         "no division '{slug}' in {db_path} — a fresh database has none; run `bureau seed` \
          to create the defaults, or pass --db / set BUREAU_DB to the server's database"
     )
+}
+
+fn skills_config(
+    sources: Vec<PathBuf>,
+    target: Option<PathBuf>,
+    apply: bool,
+) -> Result<skills::Config> {
+    Ok(skills::Config {
+        sources: if sources.is_empty() {
+            skills::default_sources()
+        } else {
+            sources
+        },
+        target: match target {
+            Some(path) => path,
+            None => skills::default_target()?,
+        },
+        apply,
+    })
+}
+
+fn print_outcomes(outcomes: &[skills::Outcome], apply: bool) {
+    for outcome in outcomes {
+        println!("{}", outcome.line());
+    }
+    if !apply && outcomes.iter().any(skills::Outcome::changed) {
+        println!("dry run: nothing written; pass --apply to make these changes");
+    }
 }
 
 fn ellipsis(s: &str, n: usize) -> String {

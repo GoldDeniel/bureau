@@ -130,6 +130,24 @@ $BIN --db "$DB" ticket show "$REF" | grep -q "\[review\]"
 $BIN --db "$DB" ticket show "$REF" | grep -q "sub-tickets:"
 echo "smoke: $REF is in review"
 
+# ---------------------------------------------------------------- skills
+SKILL_SRC="$TMPROOT/skill-src"
+SKILL_DST="$TMPROOT/skill-dst"
+mkdir -p "$SKILL_SRC/smoke-copy"
+printf -- '---\nname: smoke-copy\ndescription: fixture\n---\n\nbody\n' \
+  >"$SKILL_SRC/smoke-copy/SKILL.md"
+$BIN skills distribute smoke-copy --source "$SKILL_SRC" --target "$SKILL_DST" \
+  | grep -q 'dry run' || fail "distribute did not report a dry run"
+[ ! -e "$SKILL_DST/smoke-copy" ] || fail "dry run wrote to the target"
+$BIN skills distribute smoke-copy --source "$SKILL_SRC" --target "$SKILL_DST" --apply >/dev/null
+[ -f "$SKILL_DST/smoke-copy/SKILL.md" ] || fail "distribute did not copy the skill"
+[ -f "$SKILL_DST/.bureau-manifest.json" ] || fail "distribute did not write the manifest"
+$BIN skills distribute smoke-copy --source "$SKILL_SRC" --target "$SKILL_DST" --apply \
+  | grep -q 'up-to-date' || fail "second distribute was not a no-op"
+$BIN skills uninstall smoke-copy --target "$SKILL_DST" --apply >/dev/null
+[ ! -e "$SKILL_DST/smoke-copy" ] || fail "uninstall left the skill behind"
+echo "smoke: skills distribute is dry-run by default, idempotent and reversible"
+
 # ---------------------------------------------------------------- board page
 start_server
 
