@@ -30,7 +30,7 @@ enum Job {
 
 /// Drain the company: start work until nothing is left to start, then wait for
 /// the last jobs to finish. Newly freed workers are picked up immediately.
-pub async fn tick(db: Db, max_parallel: usize) -> Result<TickReport> {
+pub async fn tick(db: Db, max_parallel: usize, max_subtasks: usize) -> Result<TickReport> {
     let started = Instant::now();
     let mut report = TickReport::default();
 
@@ -48,7 +48,7 @@ pub async fn tick(db: Db, max_parallel: usize) -> Result<TickReport> {
     //    spawning a duplicate for an agent whose status flip has not landed yet.
     let mut set = tokio::task::JoinSet::new();
     for job in collect_jobs(&db)?.into_iter().take(max_parallel.max(1)) {
-        spawn_job(&mut set, &mut report, db.clone(), job);
+        spawn_job(&mut set, &mut report, db.clone(), job, max_subtasks);
     }
     loop {
         if set.is_empty() {
@@ -57,7 +57,7 @@ pub async fn tick(db: Db, max_parallel: usize) -> Result<TickReport> {
                 break;
             }
             for job in more.into_iter().take(max_parallel.max(1)) {
-                spawn_job(&mut set, &mut report, db.clone(), job);
+                spawn_job(&mut set, &mut report, db.clone(), job, max_subtasks);
             }
             if set.is_empty() {
                 break;
@@ -73,7 +73,7 @@ pub async fn tick(db: Db, max_parallel: usize) -> Result<TickReport> {
         let free = max_parallel.max(1).saturating_sub(set.len());
         if free > 0 {
             for job in collect_jobs(&db)?.into_iter().take(free) {
-                spawn_job(&mut set, &mut report, db.clone(), job);
+                spawn_job(&mut set, &mut report, db.clone(), job, max_subtasks);
             }
         }
     }
@@ -87,12 +87,13 @@ fn spawn_job(
     report: &mut TickReport,
     db: Db,
     job: Job,
+    max_subtasks: usize,
 ) {
     match &job {
         Job::Manager { .. } => report.managers_started += 1,
         Job::Worker { .. } => report.workers_started += 1,
     }
-    set.spawn(async move { run_job(db, job).await });
+    set.spawn(async move { run_job(db, job, max_subtasks).await });
 }
 
 fn collect_jobs(db: &Db) -> Result<Vec<Job>> {
@@ -103,7 +104,14 @@ fn collect_jobs(db: &Db) -> Result<Vec<Job>> {
     db::repair_parent_rollups(&conn)?;
     let mut jobs = Vec::new();
 
+    let paused = db::paused_division_ids(&conn)?;
+
     for division in db::divisions(&conn)? {
+        // A paused division takes no new work. Anything already running finishes
+        // because its job was spawned before the pause; nothing new starts here.
+        if paused.contains(&division.id) {
+            continue;
+        }
         let Some(manager) = db::manager_for(&conn, division.id)? else {
             continue;
         };
@@ -127,6 +135,7 @@ fn collect_jobs(db: &Db) -> Result<Vec<Job>> {
             .into_iter()
             .find(|a| a.id == agent_id)
             && let Some(ticket) = db::queued_for_agent(&conn, agent_id)?
+            && !paused.contains(&ticket.division_id)
             && let Some(division) = db::division_by_id(&conn, ticket.division_id)?
         {
             jobs.push(Job::Worker {
@@ -139,7 +148,7 @@ fn collect_jobs(db: &Db) -> Result<Vec<Job>> {
     Ok(jobs)
 }
 
-async fn run_job(db: Db, job: Job) -> Result<()> {
+async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
     match job {
         Job::Manager {
             ticket,
@@ -161,7 +170,7 @@ async fn run_job(db: Db, job: Job) -> Result<()> {
                 )?;
             }
 
-            let prompt = manager_prompt(&ticket, &division, &manager, &workers);
+            let prompt = manager_prompt(&ticket, &division, &manager, &workers, max_subtasks);
             let ctx = JobCtx {
                 kind: JobKind::Manager,
                 workers: workers.clone(),
@@ -179,7 +188,7 @@ async fn run_job(db: Db, job: Job) -> Result<()> {
 
             match result {
                 Ok(output) => {
-                    apply_plan(&db, &ticket, &division, &manager, &workers, &output).await
+                    apply_plan(&db, &ticket, &division, &manager, &workers, &output, max_subtasks).await
                 }
                 Err(e) => {
                     let msg = format!("manager {} failed: {e}", manager.slug);
@@ -320,7 +329,13 @@ fn log_file(db: &Db, ticket_ref: &str) -> String {
 
 // ---------------------------------------------------------------- prompts
 
-fn manager_prompt(t: &Ticket, d: &Division, m: &Agent, workers: &[Agent]) -> String {
+fn manager_prompt(
+    t: &Ticket,
+    d: &Division,
+    m: &Agent,
+    workers: &[Agent],
+    max_subtasks: usize,
+) -> String {
     let team = if workers.is_empty() {
         "(no workers configured — you must handle it yourself with action \"answer\")".to_string()
     } else {
@@ -367,7 +382,7 @@ Your team (workers in this division):
 {team}
 
 Decide what happens to this ticket. Rules:
-- Split real work into 1–6 self-contained sub-tickets. A worker cannot see this ticket, so every sub-ticket needs enough context to stand alone (what to build, where, acceptance criteria).
+- Split real work into 1–{max_subtasks} self-contained sub-tickets — never more than that. Prefer fewer, larger sub-tickets over a long list; if the work does not need splitting, use \"answer\" with the plan instead. A worker cannot see this ticket, so every sub-ticket needs enough context to stand alone (what to build, where, acceptance criteria).
 - Assign each sub-ticket to one worker slug from the list above. Never invent a slug.
 - Spread the work: never hand one worker more than two sub-tickets while another worker has none. Match the job to the speciality (QA and regression checks to the reviewer, research to the researcher, narrative to the storyteller, implementation to the builder).
 - If a title starts with a worker slug and a colon ("lens: ..."), assign it to that worker.
@@ -380,6 +395,7 @@ Reply with ONLY a JSON object, no prose, no code fences:
 or {{"action":"answer","body":"your answer or the plan you already made"}}
 or {{"action":"blocked","reason":"what you need from the human"}}
 "#,
+        max_subtasks = max_subtasks,
         mname = m.name,
         dname = d.name,
         dslug = d.slug,
@@ -547,6 +563,7 @@ async fn apply_plan(
     manager: &Agent,
     workers: &[Agent],
     raw: &str,
+    max_subtasks: usize,
 ) -> Result<()> {
     let plan: Option<Plan> = extract_json(raw).and_then(|j| serde_json::from_str(j).ok());
 
@@ -573,7 +590,22 @@ async fn apply_plan(
     match plan.action.as_str() {
         "delegate" if !plan.subtasks.is_empty() => {
             let mut created = Vec::new();
-            for sub in &plan.subtasks {
+            let cap = max_subtasks.max(1);
+            if plan.subtasks.len() > cap {
+                let conn = db.lock().unwrap();
+                db::add_event(
+                    &conn,
+                    "delegate",
+                    Some(ticket.id),
+                    Some(manager.id),
+                    &format!(
+                        "manager proposed {} sub-tickets, capped to {}",
+                        plan.subtasks.len(),
+                        cap
+                    ),
+                )?;
+            }
+            for sub in plan.subtasks.iter().take(cap) {
                 let title = if sub.title.trim().is_empty() {
                     "Sub-task".to_string()
                 } else {
@@ -725,6 +757,158 @@ mod tests {
     #[test]
     fn rejects_output_without_json() {
         assert!(extract_json("no json here").is_none());
+    }
+
+    #[test]
+    fn manager_prompt_states_the_subtask_cap() {
+        let ticket = Ticket {
+            id: 1,
+            ref_: "BUR-1".into(),
+            division_id: 1,
+            division_slug: "d".into(),
+            parent_id: None,
+            parent_ref: None,
+            title: "Big ticket".into(),
+            body: "do things".into(),
+            status: "new".into(),
+            priority: 2,
+            assignee_id: None,
+            assignee_slug: None,
+            assignee_name: None,
+            created_by: "human".into(),
+            result: String::new(),
+            agent_notes: String::new(),
+            attempts: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+            children: Vec::new(),
+            comment_count: 0,
+        };
+        let division = Division {
+            id: 1,
+            slug: "d".into(),
+            name: "D".into(),
+            description: String::new(),
+            project_path: "/tmp".into(),
+            created_at: String::new(),
+            manager: None,
+            counts: Default::default(),
+            total: 0,
+            paused: false,
+        };
+        let mgr = agent("mgr");
+        let p = manager_prompt(&ticket, &division, &mgr, &[], 2);
+        assert!(p.contains("1–2 self-contained sub-tickets"), "{p}");
+        assert!(!p.contains("1–6"), "the old hard-coded range must be gone");
+    }
+
+    fn plan_with(n: usize) -> String {
+        let subs: Vec<String> = (0..n)
+            .map(|i| format!("{{\"title\":\"t{i}\",\"body\":\"b{i}\",\"priority\":2,\"agent\":\"w1\"}}"))
+            .collect();
+        format!("{{\"action\":\"delegate\",\"summary\":\"s\",\"subtasks\":[{}]}}", subs.join(","))
+    }
+
+    #[tokio::test]
+    async fn delegation_is_capped_at_max_subtasks() {
+        let db = db::open(":memory:").unwrap();
+        let (ticket, division, manager, workers) = {
+            let conn = db.lock().unwrap();
+            let d = db::create_division(&conn, "d", "D", "", "/tmp").unwrap();
+            let mgr = db::create_agent(&conn, "mgr", "Mgr", "manager", Some(d), "demo", "", "").unwrap();
+            let w1 = db::create_agent(&conn, "w1", "W1", "worker", Some(d), "demo", "", "").unwrap();
+            let t = db::create_ticket(&conn, d, None, "Parent", "body", 2, None, "human", "new").unwrap();
+            let all = db::agents(&conn, None).unwrap();
+            let by = |id: i64| all.iter().find(|a| a.id == id).unwrap().clone();
+            (t, db::division_by_id(&conn, d).unwrap().unwrap(), by(mgr), vec![by(w1)])
+        };
+
+        apply_plan(&db, &ticket, &division, &manager, &workers, &plan_with(7), 2)
+            .await
+            .unwrap();
+
+        let kids = {
+            let conn = db.lock().unwrap();
+            db::children_of(&conn, ticket.id).unwrap()
+        };
+        assert_eq!(kids.len(), 2, "manager asked for 7, cap is 2");
+    }
+
+    #[tokio::test]
+    async fn delegation_below_the_cap_is_untouched() {
+        let db = db::open(":memory:").unwrap();
+        let (ticket, division, manager, workers) = {
+            let conn = db.lock().unwrap();
+            let d = db::create_division(&conn, "d", "D", "", "/tmp").unwrap();
+            let mgr = db::create_agent(&conn, "mgr", "Mgr", "manager", Some(d), "demo", "", "").unwrap();
+            let w1 = db::create_agent(&conn, "w1", "W1", "worker", Some(d), "demo", "", "").unwrap();
+            let t = db::create_ticket(&conn, d, None, "Parent", "body", 2, None, "human", "new").unwrap();
+            let all = db::agents(&conn, None).unwrap();
+            let by = |id: i64| all.iter().find(|a| a.id == id).unwrap().clone();
+            (t, db::division_by_id(&conn, d).unwrap().unwrap(), by(mgr), vec![by(w1)])
+        };
+
+        apply_plan(&db, &ticket, &division, &manager, &workers, &plan_with(2), 3)
+            .await
+            .unwrap();
+
+        let kids = {
+            let conn = db.lock().unwrap();
+            db::children_of(&conn, ticket.id).unwrap()
+        };
+        assert_eq!(kids.len(), 2);
+    }
+
+    #[test]
+    fn paused_division_takes_no_new_jobs() {
+        let db = db::open(":memory:").unwrap();
+        {
+            let conn = db.lock().unwrap();
+            let d = db::create_division(&conn, "p", "Paused", "", "/tmp").unwrap();
+            db::create_agent(&conn, "mgr", "Mgr", "manager", Some(d), "demo", "", "").unwrap();
+            db::create_agent(&conn, "w1", "W1", "worker", Some(d), "demo", "", "").unwrap();
+            // one new ticket for the manager and one already queued for the worker
+            db::create_ticket(&conn, d, None, "New work", "b", 2, None, "human", "new").unwrap();
+            db::create_ticket(&conn, d, None, "Queued work", "b", 2, None, "human", "queued").unwrap();
+        }
+
+        // Unpaused: both loops have something to do. (collect_jobs takes the
+        // mutex itself, so it must be called with no live guard.)
+        assert_eq!(
+            db.lock().unwrap().query_row("SELECT COUNT(*) FROM divisions WHERE paused=1", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(
+            !collect_jobs(&db).unwrap().is_empty(),
+            "an unpaused division must be collected"
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            assert_eq!(db::set_division_paused(&conn, "p", true).unwrap(), 1);
+        }
+        assert!(
+            collect_jobs(&db).unwrap().is_empty(),
+            "a paused division must start neither triage nor worker claims"
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            db::set_division_paused(&conn, "p", false).unwrap();
+        }
+        assert!(
+            !collect_jobs(&db).unwrap().is_empty(),
+            "resuming must make the queued work collectable again"
+        );
+    }
+
+    #[test]
+    fn pausing_unknown_division_changes_nothing() {
+        let db = db::open(":memory:").unwrap();
+        let conn = db.lock().unwrap();
+        assert_eq!(db::set_division_paused(&conn, "nope", true).unwrap(), 0);
     }
 
     fn agent(slug: &str) -> Agent {

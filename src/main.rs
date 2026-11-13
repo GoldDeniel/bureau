@@ -40,11 +40,16 @@ enum Cmd {
         /// How many worker jobs run at once.
         #[arg(long, env = "BUREAU_MAX_PARALLEL", default_value_t = 5)]
         max_parallel: usize,
+        /// Most sub-tickets a manager may create from one ticket.
+        #[arg(long, env = "BUREAU_MAX_SUBTASKS", default_value_t = 3)]
+        max_subtasks: usize,
     },
     /// Run exactly one dispatch pass (managers triage, workers execute).
     Tick {
         #[arg(long, env = "BUREAU_MAX_PARALLEL", default_value_t = 5)]
         max_parallel: usize,
+        #[arg(long, env = "BUREAU_MAX_SUBTASKS", default_value_t = 3)]
+        max_subtasks: usize,
     },
     /// Add the default divisions and agents (idempotent).
     Seed,
@@ -156,6 +161,14 @@ enum AgentCmd {
 #[derive(Subcommand)]
 enum DivisionCmd {
     List,
+    /// Stop starting new work. Tickets already in progress run to completion.
+    Pause {
+        slug: String,
+    },
+    /// Allow new work to start again.
+    Resume {
+        slug: String,
+    },
     Add {
         slug: String,
         name: String,
@@ -188,6 +201,7 @@ async fn main() -> Result<()> {
             no_dispatch,
             interval,
             max_parallel,
+            max_subtasks,
         } => {
             let db = db::open(&cli.db)?;
             if do_seed {
@@ -202,6 +216,7 @@ async fn main() -> Result<()> {
                 db: db.clone(),
                 dispatching: flag.clone(),
                 max_parallel,
+                max_subtasks,
                 token,
             };
 
@@ -214,7 +229,7 @@ async fn main() -> Result<()> {
                         if flag.swap(true, Ordering::SeqCst) {
                             continue;
                         }
-                        match dispatch::tick(db.clone(), max_parallel).await {
+                        match dispatch::tick(db.clone(), max_parallel, max_subtasks).await {
                             Ok(rep) => {
                                 if rep.managers_started + rep.workers_started > 0 {
                                     let conn = db.lock().unwrap();
@@ -263,9 +278,12 @@ async fn main() -> Result<()> {
             );
             axum::serve(listener, api::router(state)).await?;
         }
-        Cmd::Tick { max_parallel } => {
+        Cmd::Tick {
+            max_parallel,
+            max_subtasks,
+        } => {
             let db = db::open(&cli.db)?;
-            let rep = dispatch::tick(db, max_parallel).await?;
+            let rep = dispatch::tick(db, max_parallel, max_subtasks).await?;
             println!(
                 "tick: {} manager job(s), {} worker job(s), {} recovered, {}ms",
                 rep.managers_started, rep.workers_started, rep.recovered, rep.ms
@@ -557,6 +575,27 @@ async fn main() -> Result<()> {
                 DivisionCmd::List => {
                     // describe() takes the lock itself: do not hold it here or this deadlocks.
                     print!("{}", seed::describe(&db)?);
+                }
+                DivisionCmd::Pause { slug } => {
+                    let conn = db.lock().unwrap();
+                    if db::set_division_paused(&conn, &slug, true)? == 0 {
+                        return Err(anyhow::anyhow!(no_division(&slug, &cli.db)));
+                    }
+                    let running = db::divisions(&conn)?
+                        .into_iter()
+                        .find(|d| d.slug == slug)
+                        .map(|d| d.counts.in_progress)
+                        .unwrap_or(0);
+                    println!(
+                        "paused {slug}: no new triage or worker claims; {running} in-progress ticket(s) will finish"
+                    );
+                }
+                DivisionCmd::Resume { slug } => {
+                    let conn = db.lock().unwrap();
+                    if db::set_division_paused(&conn, &slug, false)? == 0 {
+                        return Err(anyhow::anyhow!(no_division(&slug, &cli.db)));
+                    }
+                    println!("resumed {slug}");
                 }
                 DivisionCmd::Add {
                     slug,

@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS divisions (
     name         TEXT NOT NULL,
     description  TEXT NOT NULL DEFAULT '',
     project_path TEXT NOT NULL DEFAULT '',
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    paused       INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -103,6 +104,18 @@ pub fn open(path: &str) -> Result<Db> {
     let conn = Connection::open(path).with_context(|| format!("opening {path}"))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch(SCHEMA)?;
+    // Added after the first schema: CREATE TABLE IF NOT EXISTS does not touch an
+    // existing table, so older databases need the column added explicitly.
+    let has_paused: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('divisions') WHERE name='paused'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_paused == 0 {
+        conn.execute_batch(
+            "ALTER TABLE divisions ADD COLUMN paused INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
     // A crash leaves agents marked running; nothing can actually be running at boot.
     conn.execute("UPDATE agents SET status='idle' WHERE status='running'", [])?;
     conn.execute(
@@ -189,6 +202,8 @@ pub struct Division {
     pub counts: Counts,
     pub total: i64,
     pub created_at: String,
+    #[serde(default)]
+    pub paused: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -311,7 +326,7 @@ fn map_agent(row: &Row) -> rusqlite::Result<Agent> {
 
 pub fn divisions(conn: &Connection) -> Result<Vec<Division>> {
     let mut stmt = conn.prepare(
-        "SELECT id, slug, name, description, project_path, created_at FROM divisions ORDER BY id",
+        "SELECT id, slug, name, description, project_path, created_at, paused FROM divisions ORDER BY id",
     )?;
     let rows = stmt
         .query_map([], |r| {
@@ -322,6 +337,7 @@ pub fn divisions(conn: &Connection) -> Result<Vec<Division>> {
                 description: r.get(3)?,
                 project_path: r.get(4)?,
                 created_at: r.get(5)?,
+                paused: r.get::<_, i64>(6)? != 0,
                 manager: None,
                 counts: Counts::default(),
                 total: 0,
@@ -367,6 +383,24 @@ pub fn division_by_slug(conn: &Connection, slug: &str) -> Result<Option<Division
 
 pub fn division_by_id(conn: &Connection, id: i64) -> Result<Option<Division>> {
     Ok(divisions(conn)?.into_iter().find(|d| d.id == id))
+}
+
+/// Pause or resume a division. A paused division starts no new triage and no new
+/// worker claims; tickets already `in_progress` keep running to completion.
+/// Returns rows changed (0 = unknown slug).
+pub fn set_division_paused(conn: &Connection, slug: &str, paused: bool) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE divisions SET paused = ?1 WHERE slug = ?2",
+        rusqlite::params![i64::from(paused), slug],
+    )?)
+}
+
+pub fn paused_division_ids(conn: &Connection) -> Result<std::collections::HashSet<i64>> {
+    let mut stmt = conn.prepare("SELECT id FROM divisions WHERE paused = 1")?;
+    let ids = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<std::collections::HashSet<i64>>>()?;
+    Ok(ids)
 }
 
 pub fn create_division(

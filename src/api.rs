@@ -19,6 +19,8 @@ pub struct AppState {
     pub db: Db,
     pub dispatching: Arc<AtomicBool>,
     pub max_parallel: usize,
+    /// Most sub-tickets a manager may create from one ticket.
+    pub max_subtasks: usize,
     /// When set, every /api route except health requires this token.
     pub token: Option<String>,
 }
@@ -33,6 +35,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/state", get(snapshot))
         .route("/api/divisions", get(list_divisions).post(create_division))
+        .route(
+            "/api/divisions/{slug}/pause",
+            post(pause_division).delete(resume_division),
+        )
         .route("/api/agents", get(list_agents).post(create_agent))
         .route(
             "/api/agents/{slug}",
@@ -268,6 +274,32 @@ async fn create_division(
     Ok(Json(
         json!({ "id": id, "division": db::division_by_id(&conn, id)? }),
     ))
+}
+
+/// Pause: no new triage, no new worker claims; in-flight tickets finish.
+async fn pause_division(
+    State(st): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    set_paused(&st, &slug, true)
+}
+
+async fn resume_division(
+    State(st): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    set_paused(&st, &slug, false)
+}
+
+fn set_paused(st: &AppState, slug: &str, paused: bool) -> Result<Json<Value>, ApiError> {
+    let conn = st.db.lock().unwrap();
+    if db::set_division_paused(&conn, slug, paused)? == 0 {
+        return Err(ApiError(anyhow::anyhow!("division '{slug}' not found")));
+    }
+    let division = db::divisions(&conn)?
+        .into_iter()
+        .find(|d| d.slug == slug);
+    Ok(Json(json!({ "division": division })))
 }
 
 // ---------------------------------------------------------------- agents
@@ -798,7 +830,7 @@ async fn run_tick(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     }
     let state = st.clone();
     tokio::spawn(async move {
-        let result = dispatch::tick(state.db.clone(), state.max_parallel).await;
+        let result = dispatch::tick(state.db.clone(), state.max_parallel, state.max_subtasks).await;
         {
             let conn = state.db.lock().unwrap();
             match result {

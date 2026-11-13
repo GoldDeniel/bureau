@@ -39,6 +39,7 @@ fn setup() -> (Router, Db) {
         db: db.clone(),
         dispatching: Arc::new(AtomicBool::new(false)),
         max_parallel: 4,
+        max_subtasks: 3,
         token: None,
     });
     (app, db)
@@ -100,7 +101,7 @@ async fn full_company_loop_over_http() {
 
     // One pass now drains the company: the manager triages, and the workers it
     // created are picked up in the same tick instead of waiting for the next one.
-    let report = bureau::dispatch::tick(db.clone(), 4).await.unwrap();
+    let report = bureau::dispatch::tick(db.clone(), 4, 3).await.unwrap();
     assert_eq!(report.managers_started, 1, "{report:?}");
     assert_eq!(report.workers_started, 2, "{report:?}");
     let (_, body) = send(&app, "GET", &format!("/api/tickets/{parent_ref}"), None).await;
@@ -200,6 +201,7 @@ async fn token_gate_protects_api_but_not_board_or_health() {
         db,
         dispatching: Arc::new(AtomicBool::new(false)),
         max_parallel: 4,
+        max_subtasks: 3,
         token: Some("s3cret".into()),
     });
 

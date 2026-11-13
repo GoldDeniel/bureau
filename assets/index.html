@@ -68,6 +68,8 @@
   .rail-label button{color:var(--mut);font-size:15px;line-height:1;padding:0 2px}
   .rail-label button:hover{color:var(--acc)}
   nav.divs{display:flex;flex-direction:column;gap:2px}
+  .divlink.paused .nm{opacity:.55}
+  .pause-tag{font-size:9px;letter-spacing:.06em;text-transform:uppercase;padding:1px 4px;border-radius:3px;background:rgba(255,193,94,.18);color:#ffc15e;vertical-align:middle}
   .divlink{
     display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;border-radius:8px;
     color:var(--mut);text-align:left;font-size:12.5px;transition:.12s;
@@ -337,6 +339,7 @@
       </div>
       <div class="top-actions">
         <div class="search"><span>⌕</span><input id="search" placeholder="Filter tickets…"><span class="kbd">/</span></div>
+        <button class="btn ghost small" id="btn-pause-div" hidden>Pause</button>
         <button class="btn ghost small" id="btn-done" title="Show the Done column">Done</button>
         <button class="btn" id="btn-refresh" title="Refresh">↻</button>
       </div>
@@ -478,6 +481,7 @@ async function load() {
     // `live` carries process elapsed seconds and the event feed grows constantly;
     // keying the board off them would repaint every 4s and lose scroll. Sign only
     // what the rail/board actually draw.
+    // divisions carry `paused`, so a pause/resume repaints the rail without a reload.
     const key = JSON.stringify([snap.version, snap.divisions, snap.agents, snap.tickets, snap.stats, snap.dispatching]);
     const changed = key !== S.snapJson;
     S.snap = snap; S.snapJson = key;
@@ -506,9 +510,10 @@ function renderRail() {
       <span class="nm">All divisions</span><span class="cnt ${open?"hot":""}">${open}</span></button>`;
   s.divisions.forEach((d,i) => {
     const n = d.counts.new + d.counts.triaged + d.counts.queued + d.counts.in_progress + d.counts.blocked + d.counts.failed;
-    html += `<button class="divlink ${S.division===d.slug?"active":""}" data-div="${esc(d.slug)}" title="${esc(d.project_path)}">
+    const paused = !!d.paused;
+    html += `<button class="divlink ${S.division===d.slug?"active":""}${paused?" paused":""}" data-div="${esc(d.slug)}" title="${esc(d.project_path)}${paused?" — paused: new work will not start":""}">
       <span class="dot ${divColor(i)}"></span>
-      <span class="nm">${esc(d.name)}</span>
+      <span class="nm">${esc(d.name)}${paused?' <span class="pause-tag">paused</span>':""}</span>
       <span class="cnt ${n?"hot":""}">${n}</span></button>`;
   });
   $("#divs").innerHTML = html;
@@ -516,6 +521,17 @@ function renderRail() {
 
   const cur = s.divisions.find(d => d.slug === S.division);
   $("#ttl").textContent = cur ? cur.name : "All divisions";
+  const pauseBtn = $("#btn-pause-div");
+  if (pauseBtn) {
+    pauseBtn.hidden = !cur;
+    if (cur) {
+      pauseBtn.textContent = cur.paused ? "Resume" : "Pause";
+      pauseBtn.title = cur.paused
+        ? "Allow this division to start new work again"
+        : "Stop starting new work; tickets already in progress finish";
+      pauseBtn.onclick = () => toggleDivisionPause(cur);
+    }
+  }
   $("#sub").textContent = cur
     ? `${cur.manager ? "manager " + cur.manager.slug : "no manager"} · ${cur.project_path || "no path"}`
     : `${s.divisions.length} divisions · ${s.agents.length} agents · ${s.tickets.length} tickets`;
@@ -1053,6 +1069,17 @@ function eventsModal() {
 $("#btn-new").onclick = newTicketModal;
 $("#btn-agents").onclick = agentsModal;
 $("#btn-add-div").onclick = addDivisionModal;
+
+async function toggleDivisionPause(div) {
+  if (!div) return;
+  const resume = !!div.paused;
+  try {
+    await api(`/api/divisions/${encodeURIComponent(div.slug)}/pause`, { method: resume ? "DELETE" : "POST" });
+    await load();
+  } catch (e) {
+    alert(`Could not ${resume ? "resume" : "pause"} ${div.slug}: ${e.message}`);
+  }
+}
 $("#btn-events").onclick = eventsModal;
 $("#btn-refresh").onclick = () => { load(); toast("refreshed"); };
 $("#dr-close").onclick = closeDrawer;
