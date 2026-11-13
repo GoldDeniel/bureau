@@ -81,3 +81,28 @@ and profile `skills` directories, including
 These tables are the per-name store. `GET`/`PUT`/`PATCH
 /api/agents/{slug}/toggles` remains the whole-selection API that the dispatcher
 reads today.
+
+## What a run actually loaded
+
+An agent in `inherit` mode with no `plugin_profile` spawns exactly as before
+toggles existed: no `XDG_CONFIG_HOME`, no extra argument. A legacy
+`plugin_profile` still selects that profile directory.
+
+An `explicit` selection writes `profiles/generated/<slug>/opencode/` from the
+global opencode config, replaces only `plugins`, and symlinks the selected
+skills. Generation runs the profile script with `--apply` before every run when
+the stored selection differs from `generated.json`. A generation failure fails
+the run with the generator's first error line; it never falls back to the
+global config.
+
+After the child exits, Bureau reads `~/.local/share/opencode/log/opencode.log`
+and keeps the `loading plugin` and skill lines written since the run started.
+`GET /api/agents/{slug}` returns them as:
+
+```json
+{"last_run":{"honoured":true,"evidence":["loading plugin ..."],"at":"...","reason":null}}
+```
+
+`honoured` is `false` when an explicit selection loaded an excluded plugin or
+missed a selected one, and `null` with a `reason` when the log is absent or the
+adapter is not opencode. Only lines that exist in the log are ever stored.
