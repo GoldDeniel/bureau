@@ -188,13 +188,24 @@ fn resolve_bin(name: &str) -> String {
 }
 
 /// Extra child env for the opencode adapter. A profile replaces opencode's whole
-/// XDG config dir, so only that profile's opencode.json is read.
+/// XDG config dir, so only that profile's opencode.json is read. "inherit" means
+/// the global config: no variable at all.
 fn plugin_env(
     profile: Option<&str>,
     root: &std::path::Path,
 ) -> Option<(&'static str, std::path::PathBuf)> {
     let name = profile?.trim();
-    (!name.is_empty()).then(|| ("XDG_CONFIG_HOME", root.join(name)))
+    if name.is_empty() || name == "inherit" {
+        return None;
+    }
+    // Managed profiles live under generated/; legacy ones one level up.
+    let generated = root.join("generated").join(name);
+    let dir = if generated.is_dir() {
+        generated
+    } else {
+        root.join(name)
+    };
+    Some(("XDG_CONFIG_HOME", dir))
 }
 
 /// Where the child's opencode config comes from.
@@ -319,6 +330,7 @@ async fn ensure_generated(
     })?;
     let out = Command::new("bash")
         .arg(&script)
+        .arg("--apply")
         .arg("--agent")
         .arg(slug)
         .arg("--skills")
@@ -837,6 +849,25 @@ mod tests {
             plugin_env(Some("worker-lite"), root).unwrap().1,
             std::path::PathBuf::from("/home/ada/.config/opencode/profiles/worker-lite")
         );
+        assert_eq!(
+            plugin_env(Some("inherit"), root),
+            None,
+            "'inherit' must produce no env var"
+        );
+        let generated_root = std::env::temp_dir().join(format!(
+            "bureau-profile-env-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(generated_root.join("generated/ada/opencode")).unwrap();
+        assert_eq!(
+            plugin_env(Some("ada"), &generated_root).unwrap().1,
+            generated_root.join("generated/ada")
+        );
+        std::fs::remove_dir_all(&generated_root).ok();
     }
 
     fn envs(cmd: &std::process::Command) -> Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> {

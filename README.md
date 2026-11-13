@@ -287,33 +287,44 @@ state, not a fault — read the children before reporting a stuck parent.
 ### opencode worker profiles
 
 An `opencode` agent inherits the global plugin set unless it gets its own
-config directory. `scripts/opencode-profiles.sh` writes three complete profiles
-under `~/.config/opencode/profiles/`:
+config directory. `scripts/opencode-profiles.sh` reads
+`~/.config/opencode/opencode.json` as the single source and generates complete
+profiles from it. It never writes the global config or the user's skills.
 
 | profile | plugins |
 |---|---|
-| `worker-lite` | ponytail only |
-| `worker-full` | ponytail + caveman + superpowers (the global set) |
+| `worker-lite` | global plugins narrowed to ponytail |
+| `worker-full` | the global plugin array, exactly as configured |
 | `manager-bare` | none |
+| `inherit` | not generated: use the global config as-is, no env override |
 
-Every profile carries the same provider wiring, because opencode replaces array
-keys instead of merging them. Regenerate after changing providers or plugins:
-
-```bash
-scripts/opencode-profiles.sh           # rewrite all three
-scripts/opencode-profiles.sh --check   # parse each one; non-zero on failure
-```
-
-Use one per process:
+Every generated profile copies the provider block and every other top-level
+key from the global config verbatim, because opencode replaces array keys
+instead of merging them. Change providers or plugins in the global file, then
+regenerate:
 
 ```bash
-XDG_CONFIG_HOME=~/.config/opencode/profiles/worker-lite opencode run …
+scripts/opencode-profiles.sh --apply   # write; dry run without --apply
+scripts/opencode-profiles.sh --check   # validate files and fingerprints
 ```
 
-opencode appends `opencode` to `XDG_CONFIG_HOME`, so the file on disk is
-`profiles/<name>/opencode/opencode.json`. Inside another opencode session, add
-`--standalone` so the run gets its own server and does not reuse the caller's
-config.
+Generated files live in a managed namespace. There is one extra `opencode/`
+level because opencode appends it to `XDG_CONFIG_HOME`:
+
+```text
+~/.config/opencode/profiles/generated/<name>/opencode/opencode.json
+XDG_CONFIG_HOME=~/.config/opencode/profiles/generated/<name> opencode run …
+```
+
+Each generated directory carries `.bureau-generated.json`, a generator version
+plus the sha256 of every emitted file. If a file was edited after generation,
+the next run refuses the whole write and names the file. `inherit` is selected
+in the board like a profile but sets no `XDG_CONFIG_HOME`, so the agent uses the
+global config exactly as before profiles existed. A blank profile or `none`
+means the same thing; `inherit` just makes the choice explicit.
+
+Inside another opencode session, add `--standalone` so the run gets its own
+server and does not reuse the caller's config.
 
 ---
 

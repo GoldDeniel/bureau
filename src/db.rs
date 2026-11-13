@@ -577,21 +577,48 @@ pub fn profiles_dir() -> Option<std::path::PathBuf> {
 }
 
 pub fn plugin_profiles() -> Vec<String> {
-    let Some(dir) = profiles_dir() else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| {
-            let dir = entry.path();
-            dir.join("opencode.json").is_file() || dir.join("opencode/opencode.json").is_file()
-        })
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect();
+    let mut names: Vec<String> = Vec::new();
+    if let Some(dir) = profiles_dir() {
+        // Managed per-agent profiles live one level deeper.
+        if let Ok(entries) = std::fs::read_dir(dir.join("generated")) {
+            names.extend(
+                entries
+                    .flatten()
+                    .filter(|entry| has_opencode_config(&entry.path()))
+                    .filter_map(|entry| entry.file_name().into_string().ok()),
+            );
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            names.extend(
+                entries
+                    .flatten()
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter(|name| name != "generated")
+                    .filter(|name| has_opencode_config(&dir.join(name))),
+            );
+        }
+    }
+    // Selectable in the board with no directory and no env: the global config.
+    names.push("inherit".to_string());
     names.sort();
+    names.dedup();
     names
+}
+
+fn has_opencode_config(dir: &std::path::Path) -> bool {
+    dir.join("opencode.json").is_file() || dir.join("opencode/opencode.json").is_file()
+}
+
+/// The directory for a profile name. A managed profile under generated/ wins
+/// over a legacy top-level directory of the same name.
+pub fn profile_dir(name: &str) -> Option<std::path::PathBuf> {
+    let root = profiles_dir()?;
+    [
+        root.join("generated").join(name),
+        root.join(name),
+    ]
+    .into_iter()
+    .find(|dir| has_opencode_config(dir))
 }
 
 /// `Ok(None)` clears the profile. Anything else must name a real profile.
@@ -1643,13 +1670,18 @@ mod tests {
         update_agent(&conn, "spark", &set("none")).unwrap();
         assert_eq!(agent_by_slug(&conn, "spark").unwrap().unwrap().plugin_profile, None);
         update_agent(&conn, "spark", &set("worker-full")).unwrap();
+        update_agent(&conn, "spark", &set("inherit")).unwrap();
+        assert_eq!(
+            agent_by_slug(&conn, "spark").unwrap().unwrap().plugin_profile.as_deref(),
+            Some("inherit")
+        );
         update_agent(&conn, "spark", &set("")).unwrap();
         assert_eq!(agent_by_slug(&conn, "spark").unwrap().unwrap().plugin_profile, None);
 
         let err = update_agent(&conn, "spark", &set("nope")).unwrap_err().to_string();
         assert!(
             err.contains(
-                "unknown plugin profile 'nope': expected one of manager-bare, worker-full, worker-lite (or 'none' to clear)"
+                "unknown plugin profile 'nope': expected one of inherit, manager-bare, worker-full, worker-lite (or 'none' to clear)"
             ),
             "{err}"
         );

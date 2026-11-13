@@ -1,129 +1,89 @@
 #!/usr/bin/env bash
-# Generate one complete opencode config per worker profile.
+# Generate per-agent opencode profiles from the user's CURRENT global config
+# without ever modifying that config.
 #
-# Why: a worker inherits the global plugin set unless its config directory
-# contains a complete opencode.json. opencode resolves that directory from
-# XDG_CONFIG_HOME and appends "opencode", so a profile is
-#   profiles/<name>/opencode/opencode.json
-# and is used with XDG_CONFIG_HOME=$HOME/.config/opencode/profiles/<name>.
-# Array keys replace instead of merging across layers, so a partial file
-# silently drops providers. Every profile is therefore built from the same
-# PROVIDERS fragment below.
+# Single source: ~/.config/opencode/opencode.json (read only). Every generated
+# profile is complete: the provider block and every other top-level key are
+# copied from the global file, only "plugins" is replaced. opencode replaces
+# array keys instead of merging them, so a partial file would silently drop
+# providers.
+#
+# Path mapping: opencode appends "opencode" to XDG_CONFIG_HOME and reads
+# opencode.json there. A profile named <name> is therefore written to
+#   <profiles>/generated/<name>/opencode/opencode.json
+# and used with
+#   XDG_CONFIG_HOME=$HOME/.config/opencode/profiles/generated/<name>
+# The ticket text wrote profiles/generated/<name>/opencode.json; the extra
+# "opencode/" level is what makes the XDG mapping resolve unchanged.
+#
+# The profile named "inherit" is never written. It means "use the global config
+# as-is": the board lists it, and the dispatcher sets no XDG_CONFIG_HOME at all.
+#
+# Safety:
+#   * dry-run by default; --apply is required to write
+#   * writes only under <profiles>/generated/ (unless --profile-root names
+#     another root explicitly)
+#   * every generated dir carries .bureau-generated.json with the generator
+#     version and the sha256 of each emitted file. If a target exists and does
+#     not match that fingerprint, the WHOLE run is refused and the file named.
 #
 # Usage:
-#   scripts/opencode-profiles.sh           # write all three profiles
-#   scripts/opencode-profiles.sh --check   # parse each profile, fail if bad
+#   scripts/opencode-profiles.sh                 # dry run: show planned writes
+#   scripts/opencode-profiles.sh --apply         # write all named profiles
+#   scripts/opencode-profiles.sh --check         # verify generated profiles
 #   scripts/opencode-profiles.sh --agent <slug> --skills a,b --plugins x,y
-#
-# The --agent form writes profiles/generated/<slug>/ only. It symlinks the
-# selected skills from the user's skill directory, so the originals stay
-# byte-identical, and marks the generated dir as inherited. It never writes
-# into a user-authored profile directory.
+#   scripts/opencode-profiles.sh --profile-root DIR --global-config FILE
 set -euo pipefail
 
-PROFILE_ROOT=${PROFILE_ROOT:-$HOME/.config/opencode/profiles}
-SKILLS_DIR=${SKILLS_DIR:-$HOME/.config/opencode/skills}
+GENERATOR_VERSION="bureau-opencode-profiles/2"
+OPENCODE_HOME=${OPENCODE_HOME:-$HOME/.config/opencode}
+GLOBAL_CONFIG=${GLOBAL_CONFIG:-$OPENCODE_HOME/opencode.json}
+PROFILE_ROOT=${PROFILE_ROOT:-$OPENCODE_HOME/profiles}
+SKILLS_DIR=${SKILLS_DIR:-$OPENCODE_HOME/skills}
 GENERATED_ROOT="$PROFILE_ROOT/generated"
+MARKER=".bureau-generated.json"
 
-# One source of truth for provider wiring. Secrets stay as {env:...}/{file:...}
-# references; never put a literal key here.
-PROVIDERS=$(cat <<'JSON'
-{
-    "freellmapi": {
-      "name": "FreeLLMAPI (local router)",
-      "env": [
-        "FREELLMAPI_KEY"
-      ],
-      "package": "@opencode/ai/providers/openai-compatible",
-      "settings": {
-        "baseURL": "http://127.0.0.1:3001/v1",
-        "apiKey": "{file:~/.hermes/secrets/freellmapi.key}"
-      },
-      "models": {
-        "glm-5.3:free": {
-          "name": "GLM 5.3 (free)",
-          "limit": {
-            "context": 1000000,
-            "output": 32768
-          }
-        },
-        "glm-5.3-flash:free": {
-          "name": "GLM 5.3 Flash (free)",
-          "limit": {
-            "context": 1000000,
-            "output": 32768
-          }
-        },
-        "qwen/qwen3.8-max:free": {
-          "name": "Qwen3.8 Max (free)",
-          "limit": {
-            "context": 1000000,
-            "output": 32768
-          }
-        },
-        "qwen3.8-flash": {
-          "name": "Qwen3.8 Flash",
-          "limit": {
-            "context": 1000000,
-            "output": 32768
-          }
-        },
-        "gemini-3.8-flash": {
-          "name": "Gemini 3.8 Flash",
-          "limit": {
-            "context": 1048576,
-            "output": 32768
-          }
-        },
-        "gpt-5.6-luna": {
-          "name": "GPT-5.6 Luna",
-          "limit": {
-            "context": 1000000,
-            "output": 32768
-          }
-        }
-      }
-    }
-  }
-JSON
-)
-
-PONYTAIL='@dietrichgebert/ponytail'
-SUPERPOWERS='superpowers@git+https://github.com/obra/superpowers.git'
-CAVEMAN='@mumme-it/opencode-caveman'
-
-PROFILE_NAMES=(worker-lite worker-full manager-bare)
-PLUGINS_WORKER_LITE="[\"$PONYTAIL\"]"
-PLUGINS_WORKER_FULL="[\"$PONYTAIL\", \"$SUPERPOWERS\", \"$CAVEMAN\"]"
-PLUGINS_MANAGER_BARE='[]'
+APPLY=0
+CHECK=0
 
 die() { echo "$*" >&2; exit 1; }
 
-plugins_for() {
-  case $1 in
-    worker-lite)   echo "$PLUGINS_WORKER_LITE" ;;
-    worker-full)   echo "$PLUGINS_WORKER_FULL" ;;
-    manager-bare)  echo "$PLUGINS_MANAGER_BARE" ;;
-  esac
+require_tools() {
+  command -v jq >/dev/null || die "jq is required"
+  command -v sha256sum >/dev/null || die "sha256sum is required"
 }
 
-generate() {
-  local name=$1 dir="$PROFILE_ROOT/$1/opencode" plugins
-  plugins=$(plugins_for "$name")
-  mkdir -p "$dir"
-  cat > "$dir/opencode.json" <<JSON
-{
-  "\$schema": "https://opencode.ai/config.json",
-  "plugins": $plugins,
-  "providers": $PROVIDERS
+hash_file() { sha256sum "$1" | cut -d' ' -f1; }
+
+# Discovery indexes ~/.agents/skills as well as the profile skill dir, so a
+# selected catalog entry must resolve from either root.
+skill_source() {
+  local name=$1 root
+  for root in "$SKILLS_DIR" "$HOME/.agents/skills"; do
+    if [ -f "$root/$name/SKILL.md" ]; then
+      echo "$root/$name"
+      return 0
+    fi
+  done
+  return 1
 }
-JSON
-  echo "wrote $dir/opencode.json"
+
+# One JSON object {"generator":..., "files":{rel:sha256}} for the given files.
+fingerprint() {
+  local base=$1; shift
+  local rel
+  {
+    for rel in "$@"; do
+      jq -nc --arg path "$rel" --arg sha "$(hash_file "$base/$rel")" \
+        '{path: $path, sha256: $sha}'
+    done
+  } | jq -s --arg generator "$GENERATOR_VERSION" \
+        '{generator: $generator,
+          files: (map({key: .path, value: .sha256}) | from_entries)}'
 }
 
 # Comma-separated names -> compact JSON array. Empty means no names.
 json_list() {
-  command -v jq >/dev/null || die "jq is required to generate an agent profile"
   if [ -z "$1" ]; then
     echo '[]'
   else
@@ -131,122 +91,248 @@ json_list() {
   fi
 }
 
-# Explicit per-agent selection. Writes only under profiles/generated/<slug>/.
-generate_agent() {
+# The global config with "plugins" replaced. Everything else is copied as-is.
+build_config() {
+  local plugins_json=$1
+  jq --argjson plugins "$plugins_json" '.plugins = $plugins' "$GLOBAL_CONFIG"
+}
+
+# Named profiles. "inherit" is deliberately absent: it is not a directory.
+PROFILE_NAMES=(worker-lite worker-full manager-bare)
+
+plugins_for() {
+  case $1 in
+    # The global plugin list, exactly as configured.
+    worker-full) jq -c '.plugins // []' "$GLOBAL_CONFIG" ;;
+    # The global list narrowed to ponytail, the cheapest worker bundle.
+    worker-lite) jq -c '[.plugins[]? | select(test("ponytail"; "i"))]' "$GLOBAL_CONFIG" ;;
+    # No plugins at all.
+    manager-bare) echo '[]' ;;
+    *) die "unknown profile '$1'" ;;
+  esac
+}
+
+# Plan a named profile into $WORK/<name>/ and echo its base directory.
+plan_named() {
+  local name=$1 base="$WORK/$1" plugins
+  plugins=$(plugins_for "$name")
+  mkdir -p "$base/opencode"
+  build_config "$plugins" > "$base/opencode/opencode.json"
+  fingerprint "$base" opencode/opencode.json > "$base/$MARKER"
+  echo "$base"
+}
+
+# Plan the explicit per-agent selection adapters.rs asks for.
+plan_agent() {
   local slug=$1 skills_csv=$2 plugins_csv=$3
   [[ "$slug" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "invalid agent slug '$slug'"
-  local base="$GENERATED_ROOT/$slug"
-  local dir="$base/opencode"
+  local base="$WORK/$slug"
   local skills_json plugins_json name
-
   skills_json=$(json_list "$skills_csv")
   plugins_json=$(json_list "$plugins_csv")
 
-  # Never write into a directory we did not generate.
-  if [ -e "$base" ] && [ ! -f "$base/generated.json" ]; then
-    die "$base exists but is not a generated profile; refusing to write there"
-  fi
-  mkdir -p "$dir"
-
-  # Skills: symlink the originals. The user's files stay byte-identical; the
-  # generated.json marker labels the whole set as inherited.
-  rm -rf "$dir/skills"
-  if [ "$(echo "$skills_json" | jq 'length')" -gt 0 ]; then
-    mkdir -p "$dir/skills"
-    while IFS= read -r name; do
-      case "$name" in
-        ""|*/*|*..*) die "invalid skill name '$name'" ;;
-      esac
-      [ -f "$SKILLS_DIR/$name/SKILL.md" ] || die "skill '$name' not found under $SKILLS_DIR"
-      ln -s "$SKILLS_DIR/$name" "$dir/skills/$name"
-    done < <(echo "$skills_json" | jq -r '.[]')
-  fi
-
-  # Same PROVIDERS fragment as every hand-written profile: array keys replace,
-  # so a missing fragment would silently drop the provider.
-  jq -n \
-    --argjson plugins "$plugins_json" \
-    --argjson providers "$PROVIDERS" \
-    --arg slug "$slug" \
-    '{ "$schema": "https://opencode.ai/config.json",
-       generated_for: $slug,
-       inherited_skills: true,
-       plugins: $plugins,
-       providers: $providers }' > "$dir/opencode.json"
-
+  mkdir -p "$base/opencode"
+  build_config "$plugins_json" > "$base/opencode/opencode.json"
   jq -n --arg slug "$slug" --argjson skills "$skills_json" --argjson plugins "$plugins_json" \
     '{ generated_for: $slug, inherited_skills: true, skills: $skills, plugins: $plugins }' \
     > "$base/generated.json"
-  echo "wrote $dir/opencode.json"
+  fingerprint "$base" opencode/opencode.json generated.json > "$base/$MARKER"
+  echo "$base"
 }
 
-# Parse every generated profile with opencode itself, so --check still proves
-# the file is valid and carries exactly the selected plugin set.
-check_generated() {
-  local rc=0 base name dir expected got
-  [ -d "$GENERATED_ROOT" ] || return 0
-  for base in "$GENERATED_ROOT"/*; do
-    [ -f "$base/generated.json" ] || continue
-    name=$(basename "$base")
-    dir="$base/opencode"
-    expected=$(jq -c '.plugins' "$base/generated.json") || { rc=1; continue; }
-    echo "== generated/$name"
-    got=$(XDG_CONFIG_HOME="$base" opencode debug config --standalone \
-      | jq -c '[.[] | select(.type == "document") | .info.plugins][0] // []') || { rc=1; continue; }
-    if [ "$got" != "$expected" ]; then
-      echo "generated/$name: plugins $got, expected $expected" >&2
-      rc=1
-      continue
+# Refuse the whole run when a target was edited after generation.
+guard() {
+  local base=$1 dir rel recorded actual
+  dir="$GENERATED_ROOT/$(basename "$base")"
+  case "$dir" in
+    "$GENERATED_ROOT"/*) ;;
+    *) die "refusing to write outside $GENERATED_ROOT: $dir" ;;
+  esac
+  local -a targets=()
+  [ -e "$dir/opencode/opencode.json" ] && targets+=("opencode/opencode.json")
+  [ -e "$dir/generated.json" ] && targets+=("generated.json")
+  [ "${#targets[@]}" -gt 0 ] || return 0
+
+  if [ ! -f "$dir/$MARKER" ]; then
+    echo "$dir/${targets[0]}: exists but has no $MARKER fingerprint; not written by this generator" >&2
+    return 1
+  fi
+  for rel in "${targets[@]}"; do
+    recorded=$(jq -r --arg p "$rel" '.files[$p] // empty' "$dir/$MARKER")
+    actual=$(hash_file "$dir/$rel")
+    if [ -z "$recorded" ]; then
+      echo "$dir/$rel: is not covered by $dir/$MARKER" >&2
+      return 1
     fi
-    echo "generated/$name: plugins $got"
+    if [ "$recorded" != "$actual" ]; then
+      echo "$dir/$rel: changed after generation (sha256 $actual, recorded $recorded); refusing to overwrite a hand-edited profile" >&2
+      return 1
+    fi
   done
-  return "$rc"
 }
 
-check() {
-  command -v jq >/dev/null || { echo "check: jq not found" >&2; return 1; }
-  local name base dir expected got rc=0
-  for name in "${PROFILE_NAMES[@]}"; do
-    base="$PROFILE_ROOT/$name"
-    dir="$base/opencode"
-    expected=$(plugins_for "$name" | jq -c .)
-    if [ ! -f "$dir/opencode.json" ]; then
-      echo "$name: missing $dir/opencode.json (run without --check)" >&2
-      rc=1
-      continue
+# Copy one planned profile, printing each path. Byte-identical files stay put.
+install() {
+  local base=$1 name dir rel source target
+  name=$(basename "$base")
+  dir="$GENERATED_ROOT/$name"
+  for rel in opencode/opencode.json generated.json "$MARKER"; do
+    source="$base/$rel"
+    target="$dir/$rel"
+    [ -f "$source" ] || continue
+    if [ -f "$target" ] && cmp -s "$source" "$target"; then
+      echo "unchanged $target"
+    elif [ "$APPLY" = 1 ]; then
+      mkdir -p "$(dirname "$target")"
+      cp "$source" "$target"
+      echo "wrote     $target"
+    else
+      echo "would write $target"
     fi
-    echo "== $name"
-    # debug config talks to a running server; --standalone parses this profile.
-    XDG_CONFIG_HOME="$base" opencode debug paths | grep '^config'
-    got=$(XDG_CONFIG_HOME="$base" opencode debug config --standalone \
-      | jq -c '[.[] | select(.type == "document") | .info.plugins][0] // []') || { rc=1; continue; }
-    if [ "$got" != "$expected" ]; then
-      echo "$name: plugins $got, expected $expected" >&2
-      rc=1
-      continue
-    fi
-    echo "$name: plugins $got"
   done
-  check_generated || rc=1
-  return "$rc"
-}
 
-case "${1:-}" in
-  "") for name in "${PROFILE_NAMES[@]}"; do generate "$name"; done ;;
-  --check) check ;;
-  --agent)
-    slug=${2:-}
-    shift 2 || die "usage: $0 --agent <slug> [--skills a,b] [--plugins x,y]"
-    skills=""
-    plugins=""
-    while [ $# -gt 0 ]; do
-      case $1 in
-        --skills) skills=${2:-}; shift 2 ;;
-        --plugins) plugins=${2:-}; shift 2 ;;
-        *) die "unknown option '$1' (expected --skills or --plugins)" ;;
+  # Skills are symlinks to the user's originals: never copied, never changed.
+  if [ -f "$base/skills.list" ]; then
+    [ "$APPLY" = 1 ] && rm -rf "$dir/opencode/skills"
+    while IFS= read -r skill; do
+      [ -n "$skill" ] || continue
+      case "$skill" in
+        */*|*..*) die "invalid skill name '$skill'" ;;
       esac
+      source=$(skill_source "$skill") || die "skill '$skill' not found under $SKILLS_DIR or $HOME/.agents/skills"
+      if [ "$APPLY" = 1 ]; then
+        mkdir -p "$dir/opencode/skills"
+        rm -rf "$dir/opencode/skills/$skill"
+        ln -s "$source" "$dir/opencode/skills/$skill"
+        echo "linked    $dir/opencode/skills/$skill"
+      else
+        echo "would link $dir/opencode/skills/$skill"
+      fi
+    done < "$base/skills.list"
+  fi
+}
+
+plan_agent_skills() {
+  local base=$1 skills_json=$2
+  : > "$base/skills.list"
+  local name
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    case "$name" in
+      */*|*..*) die "invalid skill name '$name'" ;;
+    esac
+    skill_source "$name" >/dev/null || die "skill '$name' not found under $SKILLS_DIR or $HOME/.agents/skills"
+    echo "$name" >> "$base/skills.list"
+  done < <(echo "$skills_json" | jq -r '.[]')
+}
+
+# Static check: valid JSON, hashes match, providers identical to the global file.
+check() {
+  local rc=0 base name expected actual
+  expected=$(jq -c '.providers // .provider // null' "$GLOBAL_CONFIG")
+  [ -d "$GENERATED_ROOT" ] || { echo "check: no $GENERATED_ROOT"; return 0; }
+  for base in "$GENERATED_ROOT"/*; do
+    [ -f "$base/$MARKER" ] || continue
+    name=$(basename "$base")
+    if ! jq -e . "$base/opencode/opencode.json" >/dev/null 2>&1; then
+      echo "generated/$name: opencode.json is not valid JSON" >&2
+      rc=1
+      continue
+    fi
+    actual=$(jq -c '.providers // .provider // null' "$base/opencode/opencode.json")
+    if [ "$actual" != "$expected" ]; then
+      echo "generated/$name: providers differ from $GLOBAL_CONFIG" >&2
+      rc=1
+      continue
+    fi
+    if ! ( cd "$base" && jq -r '.files | to_entries[] | "\(.value)  \(.key)"' "$MARKER" \
+           | sha256sum --check --quiet - ); then
+      echo "generated/$name: file hashes no longer match $MARKER" >&2
+      rc=1
+      continue
+    fi
+    echo "generated/$name: ok"
+  done
+  return "$rc"
+}
+
+usage() {
+  cat <<'TXT'
+Generate opencode profiles from the global config, without touching it.
+
+  --apply              write the files (default is a dry run)
+  --check              verify generated profiles and their fingerprints
+  --agent <slug>       generate one explicit agent profile
+      --skills a,b     skills to symlink (with --agent)
+      --plugins x,y    plugins to enable (with --agent)
+  --profile-root DIR   write under DIR/generated (default ~/.config/opencode/profiles)
+  --global-config FILE read FILE as the single source (default ~/.config/opencode/opencode.json)
+
+Profiles land in profiles/generated/<name>/opencode/opencode.json, used as
+XDG_CONFIG_HOME=<profiles>/generated/<name>. "inherit" is a board-selectable
+profile meaning the global config as-is; it writes no file and sets no env.
+TXT
+}
+
+main() {
+  local mode="" slug="" skills="" plugins=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --apply) APPLY=1 ;;
+      --check) CHECK=1 ;;
+      --agent) mode=agent; slug=${2:-}; shift ;;
+      --skills) skills=${2:-}; shift ;;
+      --plugins) plugins=${2:-}; shift ;;
+      --profile-root) PROFILE_ROOT=${2:-}; shift ;;
+      --global-config) GLOBAL_CONFIG=${2:-}; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option '$1' (try --help)" ;;
+    esac
+    shift
+  done
+
+  require_tools
+  [ -f "$GLOBAL_CONFIG" ] || die "global config not found: $GLOBAL_CONFIG"
+  GENERATED_ROOT="$PROFILE_ROOT/generated"
+
+  if [ "$CHECK" = 1 ]; then
+    check
+    return
+  fi
+
+  WORK=$(mktemp -d "${TMPDIR:-/tmp}/bureau-profiles-XXXXXX")
+  trap 'rm -rf "$WORK"' EXIT
+
+  local -a planned=()
+  if [ "$mode" = agent ]; then
+    [ -n "$slug" ] || die "usage: $0 --agent <slug> [--skills a,b] [--plugins x,y]"
+    local base
+    base=$(plan_agent "$slug" "$skills" "$plugins")
+    plan_agent_skills "$base" "$(json_list "$skills")"
+    planned+=("$base")
+  else
+    local name
+    for name in "${PROFILE_NAMES[@]}"; do
+      planned+=("$(plan_named "$name")")
     done
-    generate_agent "$slug" "$skills" "$plugins"
-    ;;
-  *) die "usage: $0 [--check | --agent <slug> --skills a,b --plugins x,y]" ;;
-esac
+  fi
+
+  # Preflight every target before writing a single byte: a refusal must leave
+  # the whole tree untouched.
+  local base
+  for base in "${planned[@]}"; do
+    guard "$base" || die "refused: no files were written"
+  done
+
+  for base in "${planned[@]}"; do
+    install "$base"
+  done
+
+  if [ "$APPLY" = 1 ]; then
+    echo "applied ${#planned[@]} profile(s) under $GENERATED_ROOT"
+  else
+    echo "dry run: nothing written; re-run with --apply"
+  fi
+}
+
+main "$@"

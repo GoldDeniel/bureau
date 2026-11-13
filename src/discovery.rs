@@ -437,8 +437,11 @@ fn discover_plugins(reasons: &mut Vec<String>) -> Vec<Item> {
         reasons.push(format!("no profiles under {}", root.display()));
     }
     for profile in profiles {
+        let Some(dir) = db::profile_dir(&profile) else {
+            continue;
+        };
         for rel in ["opencode/opencode.json", "opencode.json"] {
-            let file = root.join(&profile).join(rel);
+            let file = dir.join(rel);
             let Ok(text) = std::fs::read_to_string(&file) else {
                 continue;
             };
