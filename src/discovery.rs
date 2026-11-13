@@ -240,6 +240,189 @@ fn frontmatter(path: &std::path::Path) -> Option<(String, Option<String>)> {
     Some((name, description))
 }
 
+// ---------------------------------------------------------------- catalog
+
+/// One skill or plugin the board can show, with where it came from.
+/// `default_enabled` is the state an agent gets when it has no override.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CatalogItem {
+    pub name: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub default_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct Catalog {
+    pub skills: Vec<CatalogItem>,
+    pub plugins: Vec<CatalogItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Filesystem-only catalog. It never spawns opencode: the board can call it on
+/// every drawer open without paying for a subprocess.
+pub fn catalog() -> Catalog {
+    let mut reasons = Vec::new();
+    Catalog {
+        skills: catalog_skills(&mut reasons),
+        plugins: catalog_plugins(&mut reasons),
+        reason: (!reasons.is_empty()).then(|| reasons.join("; ")),
+    }
+}
+
+fn catalog_skills(reasons: &mut Vec<String>) -> Vec<CatalogItem> {
+    let mut items = Vec::new();
+    let mut seen_root = false;
+    for (root, source) in catalog_skill_roots(reasons) {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        seen_root = true;
+        for entry in entries.flatten() {
+            let file = entry.path().join("SKILL.md");
+            if !file.is_file() {
+                continue;
+            }
+            let fallback = entry.file_name().to_string_lossy().into_owned();
+            let (name, description) = frontmatter(&file).unwrap_or((fallback, None));
+            items.push(CatalogItem {
+                name,
+                source: source.clone(),
+                description,
+                default_enabled: true,
+            });
+        }
+    }
+    if !seen_root {
+        reasons.push(
+            "no skills directory under ~/.agents/skills, ~/.config/opencode/skills or profiles"
+                .into(),
+        );
+    }
+    dedup_catalog(items)
+}
+
+fn catalog_skill_roots(reasons: &mut Vec<String>) -> Vec<(PathBuf, String)> {
+    let mut roots = Vec::new();
+    match std::env::var_os("HOME") {
+        Some(home) => {
+            let home = PathBuf::from(home);
+            roots.push((home.join(".agents/skills"), "~/.agents/skills".into()));
+            roots.push((
+                home.join(".config/opencode/skills"),
+                "~/.config/opencode/skills".into(),
+            ));
+        }
+        None => reasons.push("HOME is not set".into()),
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        for rel in [".opencode/skill", ".opencode/skills"] {
+            roots.push((cwd.join(rel), rel.to_string()));
+        }
+    }
+    if let Some(root) = db::profiles_dir() {
+        roots.extend(profile_skill_roots(&root));
+    }
+    roots
+}
+
+/// User profiles keep their skills under `<profile>/skills`; generated ones
+/// under `<profile>/generated/<slug>/skills` (symlinks to the originals).
+fn profile_skill_roots(root: &std::path::Path) -> Vec<(PathBuf, String)> {
+    let mut roots = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return roots;
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let label = entry.file_name().to_string_lossy().into_owned();
+        if label == "generated" {
+            for generated in std::fs::read_dir(entry.path()).into_iter().flatten().flatten() {
+                let slug = generated.file_name().to_string_lossy().into_owned();
+                let dir = generated.path().join("skills");
+                if dir.is_dir() {
+                    roots.push((dir, format!("generated:{slug}")));
+                }
+            }
+        } else {
+            let dir = entry.path().join("skills");
+            if dir.is_dir() {
+                roots.push((dir, format!("profile:{label}")));
+            }
+        }
+    }
+    roots
+}
+
+fn catalog_plugins(reasons: &mut Vec<String>) -> Vec<CatalogItem> {
+    let mut items = Vec::new();
+    if let Some(root) = db::profiles_dir() {
+        let mut dirs: Vec<(PathBuf, String)> = Vec::new();
+        for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name != "generated" {
+                dirs.push((entry.path(), format!("profile:{name}")));
+            }
+        }
+        for entry in std::fs::read_dir(root.join("generated"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let slug = entry.file_name().to_string_lossy().into_owned();
+            dirs.push((entry.path(), format!("generated:{slug}")));
+        }
+        for (dir, source) in dirs {
+            for rel in ["opencode/opencode.json", "opencode.json"] {
+                let file = dir.join(rel);
+                let Ok(text) = std::fs::read_to_string(&file) else {
+                    continue;
+                };
+                let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                    reasons.push(format!("cannot parse {}", file.display()));
+                    continue;
+                };
+                for key in ["plugins", "plugin"] {
+                    let Some(list) = value.get(key).and_then(Value::as_array) else {
+                        continue;
+                    };
+                    for name in list.iter().filter_map(Value::as_str) {
+                        if !name.trim().is_empty() {
+                            items.push(CatalogItem {
+                                name: name.trim().to_string(),
+                                source: source.clone(),
+                                description: None,
+                                default_enabled: true,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        reasons.push("no profile directory".into());
+    }
+    for item in installed_plugins(reasons) {
+        items.push(CatalogItem {
+            name: item.name,
+            source: "installed".into(),
+            description: item.description,
+            default_enabled: true,
+        });
+    }
+    dedup_catalog(items)
+}
+
+/// One entry per name; the first source in sorted order wins.
+fn dedup_catalog(mut items: Vec<CatalogItem>) -> Vec<CatalogItem> {
+    items.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.source.cmp(&b.source)));
+    items.dedup_by(|a, b| a.name == b.name);
+    items
+}
+
 // ---------------------------------------------------------------- plugins
 
 fn discover_plugins(reasons: &mut Vec<String>) -> Vec<Item> {

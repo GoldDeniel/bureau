@@ -116,6 +116,28 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_recent ON events(id DESC);
+
+-- Per-agent overrides for discovered skills and plugins. A row records an
+-- explicit choice; no row means the discovered default (enabled). Keyed by
+-- slug so a deleted agent's overrides go with it. CREATE IF NOT EXISTS is the
+-- migration for databases opened before these tables existed.
+CREATE TABLE IF NOT EXISTS agent_skills (
+    agent_slug TEXT NOT NULL REFERENCES agents(slug) ON DELETE CASCADE,
+    skill_name TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT '',
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_slug, skill_name)
+);
+
+CREATE TABLE IF NOT EXISTS agent_plugins (
+    agent_slug  TEXT NOT NULL REFERENCES agents(slug) ON DELETE CASCADE,
+    plugin_name TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT '',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (agent_slug, plugin_name)
+);
 "#;
 
 pub fn open(path: &str) -> Result<Db> {
@@ -793,6 +815,102 @@ pub fn set_agent_toggles(
             now(),
         ],
     )?;
+    Ok(())
+}
+
+/// One skill or plugin choice sent by the board. `source` is the catalog label
+/// captured at write time, so an override stays explainable after the item is
+/// uninstalled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Toggle {
+    pub name: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub source: String,
+}
+
+pub fn agent_skill_overrides(conn: &Connection, slug: &str) -> Result<Vec<Toggle>> {
+    let mut stmt = conn.prepare(
+        "SELECT skill_name, source, enabled FROM agent_skills
+         WHERE agent_slug = ?1 ORDER BY skill_name",
+    )?;
+    let rows = stmt.query_map([slug], |r| {
+        Ok(Toggle {
+            name: r.get(0)?,
+            source: r.get(1)?,
+            enabled: r.get::<_, i64>(2)? != 0,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn agent_plugin_overrides(conn: &Connection, slug: &str) -> Result<Vec<Toggle>> {
+    let mut stmt = conn.prepare(
+        "SELECT plugin_name, source, enabled FROM agent_plugins
+         WHERE agent_slug = ?1 ORDER BY plugin_name",
+    )?;
+    let rows = stmt.query_map([slug], |r| {
+        Ok(Toggle {
+            name: r.get(0)?,
+            source: r.get(1)?,
+            enabled: r.get::<_, i64>(2)? != 0,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Write one override. `table` and `column` are internal constants.
+fn write_toggle(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    slug: &str,
+    toggle: &Toggle,
+) -> Result<()> {
+    let name = toggle.name.trim();
+    if name.is_empty() {
+        anyhow::bail!("{column} must not be empty");
+    }
+    if toggle.enabled {
+        // shortcut: turning a toggle on deletes the row because every
+        // discovered default is on; store enabled rows if defaults can be off.
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE agent_slug=?1 AND {column}=?2"),
+            params![slug, name],
+        )?;
+    } else {
+        conn.execute(
+            &format!(
+                "INSERT INTO {table} (agent_slug, {column}, source, enabled, updated_at)
+                 VALUES (?1, ?2, ?3, 0, ?4)
+                 ON CONFLICT(agent_slug, {column}) DO UPDATE SET
+                    source=excluded.source, enabled=0, updated_at=excluded.updated_at"
+            ),
+            params![slug, name, toggle.source, now()],
+        )?;
+    }
+    Ok(())
+}
+
+/// Apply a batch for one agent. The caller wraps this in a transaction so a
+/// rejected batch cannot leave half the choices written.
+pub fn apply_agent_toggles(
+    conn: &Connection,
+    slug: &str,
+    skills: &[Toggle],
+    plugins: &[Toggle],
+) -> Result<()> {
+    conn.query_row("SELECT id FROM agents WHERE slug=?1", [slug], |r| {
+        r.get::<_, i64>(0)
+    })
+    .optional()?
+    .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    for toggle in skills {
+        write_toggle(conn, "agent_skills", "skill_name", slug, toggle)?;
+    }
+    for toggle in plugins {
+        write_toggle(conn, "agent_plugins", "plugin_name", slug, toggle)?;
+    }
     Ok(())
 }
 
@@ -1671,5 +1789,110 @@ mod tests {
         );
         // Idempotent: nothing left to repair.
         assert_eq!(repair_parent_rollups(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn old_database_gains_agent_skills_and_plugins_tables() {
+        let path = tmp("migrate-skill-toggles");
+        std::fs::create_dir_all(&path).unwrap();
+        let file = path.join("old.db").to_string_lossy().into_owned();
+        {
+            let conn = Connection::open(&file).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE agents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slug TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'worker',
+                    division_id INTEGER,
+                    adapter TEXT NOT NULL DEFAULT 'demo',
+                    model TEXT NOT NULL DEFAULT '',
+                    system_hint TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'idle',
+                    created_at TEXT NOT NULL);
+                 INSERT INTO agents (slug, name, created_at)
+                 VALUES ('old', 'Old', '2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+        let db = open(&file).unwrap();
+        let conn = db.lock().unwrap();
+        for table in ["agent_skills", "agent_plugins"] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "{table} must be created on an old database");
+        }
+        assert_eq!(agent_by_slug(&conn, "old").unwrap().unwrap().name, "Old");
+        assert!(agent_skill_overrides(&conn, "old").unwrap().is_empty());
+        assert!(agent_plugin_overrides(&conn, "old").unwrap().is_empty());
+        drop(conn);
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    #[test]
+    fn skill_and_plugin_toggles_set_and_clear() {
+        let db = mem();
+        let conn = db.lock().unwrap();
+        let div = create_division(&conn, "hexa", "Hexa", "", "/tmp").unwrap();
+        create_agent(&conn, "spark", "Spark", "worker", Some(div), "opencode", "", "").unwrap();
+
+        // No rows at all: every discovered item keeps its default.
+        assert!(agent_skill_overrides(&conn, "spark").unwrap().is_empty());
+        assert!(agent_plugin_overrides(&conn, "spark").unwrap().is_empty());
+
+        apply_agent_toggles(
+            &conn,
+            "spark",
+            &[
+                Toggle { name: "gamma".into(), enabled: false, source: "~/.agents/skills".into() },
+                Toggle { name: "delta".into(), enabled: true, source: "~/.config/opencode/skills".into() },
+            ],
+            &[Toggle { name: "p-one".into(), enabled: false, source: "profile:worker-lite".into() }],
+        )
+        .unwrap();
+
+        // An explicit off is a stored row; an explicit on leaves no row.
+        let skills = agent_skill_overrides(&conn, "spark").unwrap();
+        assert_eq!(skills.len(), 1, "{skills:?}");
+        assert_eq!(skills[0].name, "gamma");
+        assert!(!skills[0].enabled);
+        assert_eq!(skills[0].source, "~/.agents/skills");
+        let plugins = agent_plugin_overrides(&conn, "spark").unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].name, "p-one");
+
+        // Clearing the off restores the discovered default.
+        apply_agent_toggles(
+            &conn,
+            "spark",
+            &[Toggle { name: "gamma".into(), enabled: true, source: String::new() }],
+            &[Toggle { name: "p-one".into(), enabled: true, source: String::new() }],
+        )
+        .unwrap();
+        assert!(agent_skill_overrides(&conn, "spark").unwrap().is_empty());
+        assert!(agent_plugin_overrides(&conn, "spark").unwrap().is_empty());
+
+        // Deleting the agent removes its overrides with it.
+        apply_agent_toggles(
+            &conn,
+            "spark",
+            &[Toggle { name: "gamma".into(), enabled: false, source: String::new() }],
+            &[],
+        )
+        .unwrap();
+        delete_agent(&conn, "spark").unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_skills", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "the foreign key must cascade");
+
+        let err = apply_agent_toggles(&conn, "ghost", &[], &[]).unwrap_err().to_string();
+        assert!(err.contains("agent ghost not found"), "{err}");
     }
 }

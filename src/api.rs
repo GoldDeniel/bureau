@@ -49,6 +49,13 @@ pub fn router(state: AppState) -> Router {
             "/api/agents/{slug}/toggles",
             put(update_agent_toggles).patch(update_agent_toggles),
         )
+        .route("/api/catalog", get(get_catalog))
+        .route(
+            "/api/agents/{slug}/skills",
+            get(agent_skills)
+                .put(update_agent_skills)
+                .patch(update_agent_skills),
+        )
         .route("/api/discovery", get(get_discovery))
         .route("/api/discovery/refresh", post(refresh_discovery))
         .route("/api/tickets", get(list_tickets).post(create_ticket))
@@ -580,11 +587,185 @@ async fn update_agent_toggles(
     Ok(Json(agent_detail_json(&conn, &slug)?))
 }
 
-async fn get_discovery() -> Json<Value> {
-    Json(discovery::get().to_json())
+/// The full discovered catalog, independent of any agent.
+async fn get_catalog() -> Json<Value> {
+    Json(serde_json::to_value(discovery::catalog()).unwrap_or_else(|_| json!({})))
 }
 
-async fn refresh_discovery() -> Json<Value> {
+fn catalog_names(items: &[discovery::CatalogItem]) -> Vec<String> {
+    items.iter().map(|item| item.name.clone()).collect()
+}
+
+/// Catalog rows plus this agent's overrides. Every discovered item appears;
+/// an override changes `enabled` and marks `origin`. Saved names that are no
+/// longer installed stay visible as `unavailable` instead of vanishing.
+fn effective_entries(catalog: &[discovery::CatalogItem], overrides: &[db::Toggle]) -> Vec<Value> {
+    let mut entries: Vec<Value> = catalog
+        .iter()
+        .map(|item| {
+            let over = overrides.iter().find(|o| o.name == item.name);
+            json!({
+                "name": item.name,
+                "source": item.source,
+                "description": item.description,
+                "default_enabled": item.default_enabled,
+                "enabled": over.map(|o| o.enabled).unwrap_or(item.default_enabled),
+                "origin": if over.is_some() { "override" } else { "default" },
+            })
+        })
+        .collect();
+    for over in overrides {
+        if catalog.iter().any(|item| item.name == over.name) {
+            continue;
+        }
+        entries.push(json!({
+            "name": over.name,
+            "source": over.source,
+            "description": Value::Null,
+            "default_enabled": false,
+            "enabled": false,
+            "origin": "unavailable",
+            "reason": "declared but not installed",
+        }));
+    }
+    entries
+}
+
+fn skill_state_json(conn: &rusqlite::Connection, slug: &str) -> Result<Value, ApiError> {
+    let agent = db::agent_by_slug(conn, slug)?
+        .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    let found = discovery::catalog();
+    Ok(json!({
+        "agent": agent.slug,
+        "skills": effective_entries(&found.skills, &db::agent_skill_overrides(conn, slug)?),
+        "plugins": effective_entries(&found.plugins, &db::agent_plugin_overrides(conn, slug)?),
+        "reason": found.reason,
+    }))
+}
+
+async fn agent_skills(
+    State(st): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let conn = st.db.lock().unwrap();
+    let target = db::agent_by_slug(&conn, &slug)?
+        .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    require_manager_scope(&conn, &headers, &target)?;
+    Ok(Json(skill_state_json(&conn, &slug)?))
+}
+
+/// A toggle may be `"name"` (on) or `{"name": "...", "enabled": false}`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ToggleInput {
+    Named { name: String, enabled: bool },
+    Plain(String),
+}
+
+impl ToggleInput {
+    fn into_parts(self) -> (String, bool) {
+        match self {
+            Self::Named { name, enabled } => (name, enabled),
+            Self::Plain(name) => (name, true),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SkillToggleBody {
+    #[serde(default)]
+    skills: Vec<ToggleInput>,
+    #[serde(default)]
+    plugins: Vec<ToggleInput>,
+}
+
+fn normalize_toggles(kind: &str, inputs: Vec<ToggleInput>) -> Result<Vec<db::Toggle>, ApiError> {
+    let mut out: Vec<db::Toggle> = Vec::new();
+    for input in inputs {
+        let (name, enabled) = input.into_parts();
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(anyhow::anyhow!("{kind} names must not be empty").into());
+        }
+        match out.iter_mut().find(|toggle| toggle.name == name) {
+            Some(existing) => existing.enabled = enabled,
+            None => out.push(db::Toggle {
+                name,
+                enabled,
+                source: String::new(),
+            }),
+        }
+    }
+    Ok(out)
+}
+
+fn toggle_message(slug: &str, skills: &[db::Toggle], plugins: &[db::Toggle]) -> String {
+    let state = |enabled: bool| if enabled { "on" } else { "off" };
+    let parts: Vec<String> = skills
+        .iter()
+        .map(|t| format!("skill {} {}", t.name, state(t.enabled)))
+        .chain(
+            plugins
+                .iter()
+                .map(|t| format!("plugin {} {}", t.name, state(t.enabled))),
+        )
+        .collect();
+    if parts.is_empty() {
+        format!("{slug} sent no skill or plugin changes")
+    } else {
+        format!("{} set {}", slug, parts.join(", "))
+    }
+}
+
+/// PUT and PATCH both land here. Names are validated against the catalog and
+/// the whole batch is one transaction; an unknown name writes nothing.
+async fn update_agent_skills(
+    State(st): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<SkillToggleBody>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = st.db.lock().unwrap();
+    let target = db::agent_by_slug(&conn, &slug)?
+        .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    require_manager_scope(&conn, &headers, &target)?;
+
+    let found = discovery::catalog();
+    let mut skills = normalize_toggles("skill", body.skills)?;
+    let mut plugins = normalize_toggles("plugin", body.plugins)?;
+    for toggle in &mut skills {
+        let item = found
+            .skills
+            .iter()
+            .find(|item| item.name == toggle.name)
+            .ok_or_else(|| {
+                ApiError::unknown("skill", &toggle.name, &catalog_names(&found.skills))
+            })?;
+        toggle.source = item.source.clone();
+    }
+    for toggle in &mut plugins {
+        let item = found
+            .plugins
+            .iter()
+            .find(|item| item.name == toggle.name)
+            .ok_or_else(|| {
+                ApiError::unknown("plugin", &toggle.name, &catalog_names(&found.plugins))
+            })?;
+        toggle.source = item.source.clone();
+    }
+
+    let message = toggle_message(&slug, &skills, &plugins);
+    let tx = conn.transaction()?;
+    db::apply_agent_toggles(&tx, &slug, &skills, &plugins)?;
+    db::add_event(&tx, "skills", None, Some(target.id), &message)?;
+    tx.commit()?;
+    Ok(Json(skill_state_json(&conn, &slug)?))
+}
+
+async fn get_discovery() -> Json<Value> {
+    Json(discovery::get().to_json())
+}async fn refresh_discovery() -> Json<Value> {
     Json(discovery::refresh().to_json())
 }
 
