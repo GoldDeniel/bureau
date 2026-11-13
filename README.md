@@ -284,6 +284,37 @@ sub-ticket prompt carries its own context.
 **While children are open, the parent reads `blocked`.** That is the waiting
 state, not a fault — read the children before reporting a stuck parent.
 
+### opencode worker profiles
+
+An `opencode` agent inherits the global plugin set unless it gets its own
+config directory. `scripts/opencode-profiles.sh` writes three complete profiles
+under `~/.config/opencode/profiles/`:
+
+| profile | plugins |
+|---|---|
+| `worker-lite` | ponytail only |
+| `worker-full` | ponytail + caveman + superpowers (the global set) |
+| `manager-bare` | none |
+
+Every profile carries the same provider wiring, because opencode replaces array
+keys instead of merging them. Regenerate after changing providers or plugins:
+
+```bash
+scripts/opencode-profiles.sh           # rewrite all three
+scripts/opencode-profiles.sh --check   # parse each one; non-zero on failure
+```
+
+Use one per process:
+
+```bash
+XDG_CONFIG_HOME=~/.config/opencode/profiles/worker-lite opencode run …
+```
+
+opencode appends `opencode` to `XDG_CONFIG_HOME`, so the file on disk is
+`profiles/<name>/opencode/opencode.json`. Inside another opencode session, add
+`--standalone` so the run gets its own server and does not reuse the caller's
+config.
+
 ---
 
 ## Watching agents work
@@ -355,10 +386,16 @@ Bearer`, a cookie, or `?token=`. `/` and `/api/health` stay open.
 | GET/POST | `/api/divisions` | list / create |
 | POST / DELETE | `/api/divisions/{slug}/pause` | pause / resume a division |
 | GET/POST | `/api/agents` | list / create |
-| PATCH | `/api/agents/{slug}` | adapter, model, hint, enabled, role |
+| PATCH | `/api/agents/{slug}` | adapter, model, hint, enabled, role, plugin_profile |
 | DELETE | `/api/agents/{slug}` | remove an agent |
+| GET | `/api/agents` | agents plus `plugin_profiles` (valid names) |
 | GET | `/api/events?limit=` | activity log |
 | POST | `/api/dispatch/tick` | start a pass in the background |
+
+`PATCH /api/agents/{slug}` also takes an optional `X-Bureau-Agent: <slug>`
+header: when present, that agent must be a manager and may only patch agents
+in its own division (403 otherwise). Unknown `plugin_profile` names are 400 and
+the error lists the valid ones.
 
 Things the API will not tell you politely:
 
