@@ -1,13 +1,14 @@
 //! HTTP API + the single-page board UI.
 use crate::db::{self, AgentPatch, Db, STATUSES};
+use crate::discovery;
 use crate::dispatch;
 use crate::live;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -42,8 +43,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/agents", get(list_agents).post(create_agent))
         .route(
             "/api/agents/{slug}",
-            patch(patch_agent).delete(delete_agent),
+            get(agent_detail).patch(patch_agent).delete(delete_agent),
         )
+        .route(
+            "/api/agents/{slug}/toggles",
+            put(update_agent_toggles).patch(update_agent_toggles),
+        )
+        .route("/api/discovery", get(get_discovery))
+        .route("/api/discovery/refresh", post(refresh_discovery))
         .route("/api/tickets", get(list_tickets).post(create_ticket))
         .route("/api/tickets/{key}", get(get_ticket).patch(patch_ticket))
         .route("/api/tickets/{key}/comment", post(add_comment))
@@ -142,30 +149,63 @@ async fn health() -> Json<Value> {
 
 // ---------------------------------------------------------------- errors
 
-pub struct ApiError(anyhow::Error);
+pub struct ApiError {
+    code: Option<StatusCode>,
+    err: anyhow::Error,
+    /// Extra fields merged into the JSON body, such as the valid names.
+    extra: Option<Value>,
+}
+
+impl ApiError {
+    /// An error with a chosen status. Everything else keeps the 404/400 mapping.
+    pub fn status(code: StatusCode, msg: impl Into<String>) -> Self {
+        Self {
+            code: Some(code),
+            err: anyhow::anyhow!(msg.into()),
+            extra: None,
+        }
+    }
+
+    /// A rejected name, with the full list the client may use instead.
+    fn unknown(kind: &str, name: &str, valid: &[String]) -> Self {
+        Self {
+            code: Some(StatusCode::BAD_REQUEST),
+            err: anyhow::anyhow!("unknown {kind} '{name}'"),
+            extra: Some(json!({ "valid": valid })),
+        }
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let msg = format!("{:#}", self.0);
-        let code = if msg.contains("not found") {
+        let msg = format!("{:#}", self.err);
+        let code = self.code.unwrap_or(if msg.contains("not found") {
             StatusCode::NOT_FOUND
         } else {
             StatusCode::BAD_REQUEST
-        };
-        (code, Json(json!({ "error": msg }))).into_response()
+        });
+        let mut body = json!({ "error": msg });
+        if let (Some(Value::Object(extra)), Value::Object(map)) = (self.extra, &mut body) {
+            map.extend(extra);
+        }
+        (code, Json(body)).into_response()
     }
 }
 
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(e: E) -> Self {
-        ApiError(e.into())
+        Self {
+            code: None,
+            err: e.into(),
+            extra: None,
+        }
     }
 }
 
 macro_rules! ticket_or_404 {
     ($conn:expr, $key:expr) => {
         db::ticket_by_ref(&$conn, &$key)?
-            .ok_or_else(|| ApiError(anyhow::anyhow!("ticket {} not found", $key)))?
+            .ok_or_else(|| ApiError::from(anyhow::anyhow!("ticket {} not found", $key)))?
     };
 }
 
@@ -306,7 +346,10 @@ fn set_paused(st: &AppState, slug: &str, paused: bool) -> Result<Json<Value>, Ap
 
 async fn list_agents(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     let conn = st.db.lock().unwrap();
-    Ok(Json(json!({ "agents": db::agents(&conn, None)? })))
+    Ok(Json(json!({
+        "agents": db::agents(&conn, None)?,
+        "plugin_profiles": db::plugin_profiles(),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -357,17 +400,192 @@ async fn create_agent(
     ))
 }
 
+/// Who is acting, from `X-Bureau-Agent`. No header means the human/CLI surface.
+/// A named agent must be a manager and stay inside its own division.
+fn require_manager_scope(
+    conn: &rusqlite::Connection,
+    headers: &HeaderMap,
+    target: &db::Agent,
+) -> Result<(), ApiError> {
+    let Some(raw) = headers.get("x-bureau-agent") else {
+        return Ok(());
+    };
+    let acting = raw.to_str().unwrap_or("").trim();
+    let actor = db::agent_by_slug(conn, acting)?.ok_or_else(|| {
+        ApiError::status(
+            StatusCode::FORBIDDEN,
+            format!("acting agent '{}' not found", acting),
+        )
+    })?;
+    if actor.role != "manager" {
+        return Err(ApiError::status(
+            StatusCode::FORBIDDEN,
+            format!("agent {} is not a manager", actor.slug),
+        ));
+    }
+    if actor.division_id.is_none() || actor.division_id != target.division_id {
+        return Err(ApiError::status(
+            StatusCode::FORBIDDEN,
+            format!(
+                "manager {} (division {}) cannot manage agent {} (division {})",
+                actor.slug,
+                division_label(conn, actor.division_id),
+                target.slug,
+                division_label(conn, target.division_id),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn division_label(conn: &rusqlite::Connection, id: Option<i64>) -> String {
+    id.and_then(|id| db::division_by_id(conn, id).ok().flatten())
+        .map(|d| d.name)
+        .unwrap_or_else(|| "none".into())
+}
+
 async fn patch_agent(
     State(st): State<AppState>,
     Path(slug): Path<String>,
-    Json(patch): Json<AgentPatch>,
+    headers: HeaderMap,
+    Json(mut patch): Json<AgentPatch>,
 ) -> Result<Json<Value>, ApiError> {
     let conn = st.db.lock().unwrap();
-    if db::agent_by_slug(&conn, &slug)?.is_none() {
-        return Err(anyhow::anyhow!("agent {} not found", slug).into());
+    let target = db::agent_by_slug(&conn, &slug)?
+        .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    require_manager_scope(&conn, &headers, &target)?;
+    if let Some(profile) = &patch.plugin_profile {
+        patch.plugin_profile = Some(profile.trim().to_string());
     }
     db::update_agent(&conn, &slug, &patch)?;
     Ok(Json(json!({ "agent": db::agent_by_slug(&conn, &slug)? })))
+}
+
+/// Entries the board renders for one toggle list. `inherit` shows the whole
+/// discovered default set; `explicit` shows exactly what this agent declared,
+/// marking anything no longer installed as unavailable.
+fn toggle_entries(discovered: &[discovery::Item], selected: &[String], mode: &str) -> Vec<Value> {
+    fn entry(name: &str, origin: &str, enabled: bool, reason: Value) -> Value {
+        json!({ "name": name, "origin": origin, "enabled": enabled, "reason": reason })
+    }
+    if mode == "inherit" {
+        return discovered
+            .iter()
+            .map(|item| entry(&item.name, "inherit", true, Value::Null))
+            .collect();
+    }
+    selected
+        .iter()
+        .map(|name| {
+            if discovered.iter().any(|item| &item.name == name) {
+                entry(name, "explicit", true, Value::Null)
+            } else {
+                entry(
+                    name,
+                    "unavailable",
+                    false,
+                    json!("declared but not installed"),
+                )
+            }
+        })
+        .collect()
+}
+
+fn agent_detail_json(conn: &rusqlite::Connection, slug: &str) -> Result<Value, ApiError> {
+    let agent = db::agent_by_slug(conn, slug)?
+        .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    let selected = db::agent_toggles(conn, slug)?;
+    let found = discovery::get();
+    let mode = selected.mode.clone();
+    Ok(json!({
+        "agent": agent,
+        "toggles": {
+            "mode": mode,
+            "skills": toggle_entries(&found.skills, &selected.skills, &selected.mode),
+            "plugins": toggle_entries(&found.plugins, &selected.plugins, &selected.mode),
+            "discovery": {
+                "skills_at": found.skills_at,
+                "plugins_at": found.plugins_at,
+                "skills_source": found.skills_source,
+                "stale": found.stale(),
+            },
+        },
+        "last_run": null,
+    }))
+}
+
+async fn agent_detail(
+    State(st): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let conn = st.db.lock().unwrap();
+    let target = db::agent_by_slug(&conn, &slug)?
+        .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    require_manager_scope(&conn, &headers, &target)?;
+    Ok(Json(agent_detail_json(&conn, &slug)?))
+}
+
+#[derive(Deserialize)]
+struct ToggleBody {
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    plugins: Vec<String>,
+    #[serde(default = "default_toggle_mode")]
+    mode: String,
+}
+
+fn default_toggle_mode() -> String {
+    "explicit".into()
+}
+
+/// PUT and PATCH both land here. An unknown name is rejected with the full
+/// valid list and nothing is written.
+async fn update_agent_toggles(
+    State(st): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<ToggleBody>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = st.db.lock().unwrap();
+    let target = db::agent_by_slug(&conn, &slug)?
+        .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    require_manager_scope(&conn, &headers, &target)?;
+
+    let mode = body.mode.trim();
+    if !matches!(mode, "inherit" | "explicit") {
+        return Err(anyhow::anyhow!(
+            "invalid mode '{mode}': expected 'inherit' or 'explicit'"
+        )
+        .into());
+    }
+    // A write must validate against real discovery, so wait for a cold cache.
+    let found = discovery::cached().unwrap_or_else(discovery::refresh);
+    let skills: Vec<String> = body.skills.iter().map(|s| s.trim().to_string()).collect();
+    let plugins: Vec<String> = body.plugins.iter().map(|s| s.trim().to_string()).collect();
+    let valid_skills: Vec<String> = found.skills.iter().map(|i| i.name.clone()).collect();
+    let valid_plugins: Vec<String> = found.plugins.iter().map(|i| i.name.clone()).collect();
+    for name in &skills {
+        if !valid_skills.contains(name) {
+            return Err(ApiError::unknown("skill", name, &valid_skills));
+        }
+    }
+    for name in &plugins {
+        if !valid_plugins.contains(name) {
+            return Err(ApiError::unknown("plugin", name, &valid_plugins));
+        }
+    }
+    db::set_agent_toggles(&conn, &slug, mode, &skills, &plugins)?;
+    Ok(Json(agent_detail_json(&conn, &slug)?))
+}
+
+async fn get_discovery() -> Json<Value> {
+    Json(discovery::get().to_json())
+}
+
+async fn refresh_discovery() -> Json<Value> {
+    Json(discovery::refresh().to_json())
 }
 
 #[derive(Deserialize)]

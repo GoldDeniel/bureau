@@ -54,6 +54,17 @@ CREATE TABLE IF NOT EXISTS agents (
 CREATE UNIQUE INDEX IF NOT EXISTS one_manager_per_division
     ON agents(division_id) WHERE role = 'manager';
 
+-- Skills and plugins selected for an agent. No row means inherit: today's
+-- behaviour, where opencode's own defaults apply. CREATE IF NOT EXISTS is
+-- the migration for databases opened before this table existed.
+CREATE TABLE IF NOT EXISTS agent_toggles (
+    agent_id   INTEGER PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    mode       TEXT NOT NULL DEFAULT 'inherit',
+    skills     TEXT NOT NULL DEFAULT '[]',
+    plugins    TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tickets (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ref         TEXT UNIQUE,
@@ -632,6 +643,87 @@ pub fn update_agent(conn: &Connection, slug: &str, p: &AgentPatch) -> Result<()>
     Ok(())
 }
 
+/// Per-agent skill/plugin selection. `inherit` means no row and today's
+/// behaviour: opencode's own defaults. Names are validated against discovery
+/// by the API; this layer rejects invalid modes and blank names.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentToggles {
+    pub mode: String,
+    pub skills: Vec<String>,
+    pub plugins: Vec<String>,
+}
+
+pub fn agent_toggles(conn: &Connection, slug: &str) -> Result<AgentToggles> {
+    let row: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT t.mode, t.skills, t.plugins
+             FROM agent_toggles t JOIN agents a ON a.id = t.agent_id
+             WHERE a.slug = ?1",
+            [slug],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((mode, skills, plugins)) = row else {
+        return Ok(AgentToggles {
+            mode: "inherit".into(),
+            skills: Vec::new(),
+            plugins: Vec::new(),
+        });
+    };
+    Ok(AgentToggles {
+        mode,
+        skills: serde_json::from_str(&skills).unwrap_or_default(),
+        plugins: serde_json::from_str(&plugins).unwrap_or_default(),
+    })
+}
+
+fn toggle_names(kind: &str, names: &[String]) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::with_capacity(names.len());
+    for name in names {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("{kind} names must not be empty");
+        }
+        if !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    }
+    Ok(out)
+}
+
+pub fn set_agent_toggles(
+    conn: &Connection,
+    slug: &str,
+    mode: &str,
+    skills: &[String],
+    plugins: &[String],
+) -> Result<()> {
+    if !matches!(mode, "inherit" | "explicit") {
+        anyhow::bail!("invalid mode '{mode}': expected 'inherit' or 'explicit'");
+    }
+    let skills = toggle_names("skill", skills)?;
+    let plugins = toggle_names("plugin", plugins)?;
+    let agent_id: i64 = conn
+        .query_row("SELECT id FROM agents WHERE slug = ?1", [slug], |r| r.get(0))
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    conn.execute(
+        "INSERT INTO agent_toggles (agent_id, mode, skills, plugins, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(agent_id) DO UPDATE SET
+            mode=excluded.mode, skills=excluded.skills,
+            plugins=excluded.plugins, updated_at=excluded.updated_at",
+        params![
+            agent_id,
+            mode,
+            serde_json::to_string(&skills)?,
+            serde_json::to_string(&plugins)?,
+            now(),
+        ],
+    )?;
+    Ok(())
+}
+
 /// Delete an agent row. Call `release_agent_tickets` first: the foreign key
 /// would clear `assignee_id` but leave the tickets stuck in their old status.
 pub fn delete_agent(conn: &Connection, slug: &str) -> Result<()> {
@@ -1207,6 +1299,79 @@ mod tests {
         let conn = db.lock().unwrap();
         assert!(has_column(&conn, "agents", "plugin_profile").unwrap());
         assert_eq!(agent_by_slug(&conn, "old").unwrap().unwrap().plugin_profile, None);
+        drop(conn);
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    #[test]
+    fn agent_without_toggles_inherits() {
+        let db = mem();
+        let conn = db.lock().unwrap();
+        let div = create_division(&conn, "hexa", "Hexa", "", "/tmp").unwrap();
+        create_agent(&conn, "spark", "Spark", "worker", Some(div), "opencode", "", "").unwrap();
+
+        // No row == inherit == today's behaviour.
+        let t = agent_toggles(&conn, "spark").unwrap();
+        assert_eq!(t.mode, "inherit");
+        assert!(t.skills.is_empty() && t.plugins.is_empty());
+
+        set_agent_toggles(
+            &conn,
+            "spark",
+            "explicit",
+            &["pdf".into(), "pdf".into()],
+            &["ponytail".into()],
+        )
+        .unwrap();
+        let t = agent_toggles(&conn, "spark").unwrap();
+        assert_eq!(t.mode, "explicit");
+        assert_eq!(t.skills, vec!["pdf"]);
+        assert_eq!(t.plugins, vec!["ponytail"]);
+
+        let err = set_agent_toggles(&conn, "spark", "sometimes", &[], &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid mode 'sometimes'"), "{err}");
+        assert_eq!(agent_toggles(&conn, "spark").unwrap().mode, "explicit");
+    }
+
+    #[test]
+    fn old_database_gains_agent_toggles_without_touching_agents() {
+        let path = tmp("migrate-toggles");
+        std::fs::create_dir_all(&path).unwrap();
+        let file = path.join("old.db").to_string_lossy().into_owned();
+        {
+            let conn = Connection::open(&file).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE agents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slug TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'worker',
+                    division_id INTEGER,
+                    adapter TEXT NOT NULL DEFAULT 'demo',
+                    model TEXT NOT NULL DEFAULT '',
+                    system_hint TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'idle',
+                    created_at TEXT NOT NULL);
+                 INSERT INTO agents (slug, name, created_at)
+                 VALUES ('old', 'Old', '2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+        let db = open(&file).unwrap();
+        let conn = db.lock().unwrap();
+        let table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_toggles'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, 1, "agent_toggles must be created on an old database");
+        assert_eq!(agent_by_slug(&conn, "old").unwrap().unwrap().name, "Old");
+        assert_eq!(agent_toggles(&conn, "old").unwrap().mode, "inherit");
         drop(conn);
         std::fs::remove_dir_all(&path).ok();
     }
