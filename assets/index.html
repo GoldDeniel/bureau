@@ -93,6 +93,7 @@
   .agent-row .sel{font-size:9.5px;color:#9fb0d8;border:1px solid #2c3752;background:#111726;padding:0 5px;border-radius:5px;white-space:nowrap}
   .agent-row[data-agent]{cursor:pointer;border-radius:6px}
   .agent-row[data-agent]:hover{background:#141a27}
+  .agent-row[data-agent]:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
   .st{width:6px;height:6px;border-radius:50%;background:#3a4152;flex:none}
   .st.running{background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse 1.2s infinite}
   .st.idle{background:#4b556b}
@@ -630,7 +631,7 @@ function renderRail() {
   $("#agents-mini").innerHTML = shown.map(a => {
     const sum = SUMMARY.get(a.slug);
     const sel = sum ? `<span class="sel" title="${sum.skills.on + sum.plugins.on} of ${sum.skills.total + sum.plugins.total} skills and plugins enabled">⚙ ${sum.skills.on + sum.plugins.on}/${sum.skills.total + sum.plugins.total}</span>` : "";
-    return `<div class="agent-row" data-agent="${esc(a.slug)}" title="${esc(a.role)} · ${esc(a.adapter)} · click for skills and plugins">
+    return `<div class="agent-row" data-agent="${esc(a.slug)}" role="button" tabindex="0" title="${esc(a.role)} · ${esc(a.adapter)} · click for skills and plugins">
       <span class="st ${esc(a.status)}"></span>
       <span class="slug">${esc(a.slug)}</span>
       <span>${esc(a.role === "manager" ? "manager" : "")}</span>
@@ -643,6 +644,9 @@ function renderRail() {
       : "") || `<div class="empty">no agents</div>`;
   $("#agents-mini").querySelectorAll(".agent-row[data-agent]").forEach(row => {
     row.onclick = () => openAgent(row.dataset.agent);
+    row.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openAgent(row.dataset.agent); }
+    };
   });
   const more = $("#btn-more-agents"); if (more) more.onclick = (e) => { e.stopPropagation(); agentsModal(); };
   renderLive(s.live || []);
