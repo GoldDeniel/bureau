@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS agent_toggles (
     updated_at TEXT NOT NULL
 );
 
+-- Last run per agent: the opencode log evidence that the selection was
+-- honoured. honoured is NULL when the log cannot prove it.
+CREATE TABLE IF NOT EXISTS agent_runs (
+    agent_id INTEGER PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    at       TEXT NOT NULL,
+    mode     TEXT NOT NULL DEFAULT 'inherit',
+    honoured INTEGER,
+    evidence TEXT NOT NULL DEFAULT '[]',
+    reason   TEXT
+);
+
 CREATE TABLE IF NOT EXISTS tickets (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ref         TEXT UNIQUE,
@@ -651,6 +662,67 @@ pub struct AgentToggles {
     pub mode: String,
     pub skills: Vec<String>,
     pub plugins: Vec<String>,
+}
+
+impl Default for AgentToggles {
+    fn default() -> Self {
+        Self {
+            mode: "inherit".into(),
+            skills: Vec::new(),
+            plugins: Vec::new(),
+        }
+    }
+}
+
+/// What a run actually loaded, from opencode's own log. `honoured` is NULL
+/// when the log cannot prove either way.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LastRun {
+    pub honoured: Option<bool>,
+    pub evidence: Vec<String>,
+    pub at: String,
+    pub reason: Option<String>,
+}
+
+pub fn record_agent_run(conn: &Connection, slug: &str, run: &LastRun, mode: &str) -> Result<()> {
+    let agent_id: i64 = conn
+        .query_row("SELECT id FROM agents WHERE slug = ?1", [slug], |r| r.get(0))
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    conn.execute(
+        "INSERT INTO agent_runs (agent_id, at, mode, honoured, evidence, reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(agent_id) DO UPDATE SET
+            at=excluded.at, mode=excluded.mode, honoured=excluded.honoured,
+            evidence=excluded.evidence, reason=excluded.reason",
+        params![
+            agent_id,
+            run.at,
+            mode,
+            run.honoured,
+            serde_json::to_string(&run.evidence)?,
+            run.reason,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn last_agent_run(conn: &Connection, slug: &str) -> Result<Option<LastRun>> {
+    let row: Option<(String, Option<i64>, String, Option<String>)> = conn
+        .query_row(
+            "SELECT r.at, r.honoured, r.evidence, r.reason
+             FROM agent_runs r JOIN agents a ON a.id = r.agent_id
+             WHERE a.slug = ?1",
+            [slug],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    Ok(row.map(|(at, honoured, evidence, reason)| LastRun {
+        honoured: honoured.map(|v| v != 0),
+        evidence: serde_json::from_str(&evidence).unwrap_or_default(),
+        at,
+        reason,
+    }))
 }
 
 pub fn agent_toggles(conn: &Connection, slug: &str) -> Result<AgentToggles> {
@@ -1333,6 +1405,55 @@ mod tests {
             .to_string();
         assert!(err.contains("invalid mode 'sometimes'"), "{err}");
         assert_eq!(agent_toggles(&conn, "spark").unwrap().mode, "explicit");
+    }
+
+    #[test]
+    fn last_run_round_trips_and_survives_a_reopen() {
+        let path = tmp("last-run");
+        std::fs::create_dir_all(&path).unwrap();
+        let file = path.join("run.db").to_string_lossy().into_owned();
+        {
+            let db = open(&file).unwrap();
+            let conn = db.lock().unwrap();
+            let div = create_division(&conn, "hexa", "Hexa", "", "/tmp").unwrap();
+            create_agent(&conn, "spark", "Spark", "worker", Some(div), "opencode", "", "").unwrap();
+            assert!(last_agent_run(&conn, "spark").unwrap().is_none());
+
+            record_agent_run(
+                &conn,
+                "spark",
+                &LastRun {
+                    honoured: Some(false),
+                    evidence: vec!["loading plugin superpowers".into()],
+                    at: "2026-11-13T12:00:00Z".into(),
+                    reason: Some("selection excludes plugin 'superpowers'".into()),
+                },
+                "explicit",
+            )
+            .unwrap();
+            // A second run replaces the first, it does not append.
+            record_agent_run(
+                &conn,
+                "spark",
+                &LastRun {
+                    honoured: None,
+                    evidence: Vec::new(),
+                    at: "2026-11-13T12:01:00Z".into(),
+                    reason: Some("opencode log not found".into()),
+                },
+                "explicit",
+            )
+            .unwrap();
+        }
+        let db = open(&file).unwrap();
+        let conn = db.lock().unwrap();
+        let run = last_agent_run(&conn, "spark").unwrap().unwrap();
+        assert_eq!(run.honoured, None, "unknown must not become false");
+        assert!(run.evidence.is_empty());
+        assert_eq!(run.at, "2026-11-13T12:01:00Z");
+        assert_eq!(run.reason.as_deref(), Some("opencode log not found"));
+        drop(conn);
+        std::fs::remove_dir_all(&path).ok();
     }
 
     #[test]

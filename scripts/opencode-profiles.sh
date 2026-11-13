@@ -13,9 +13,17 @@
 # Usage:
 #   scripts/opencode-profiles.sh           # write all three profiles
 #   scripts/opencode-profiles.sh --check   # parse each profile, fail if bad
+#   scripts/opencode-profiles.sh --agent <slug> --skills a,b --plugins x,y
+#
+# The --agent form writes profiles/generated/<slug>/ only. It symlinks the
+# selected skills from the user's skill directory, so the originals stay
+# byte-identical, and marks the generated dir as inherited. It never writes
+# into a user-authored profile directory.
 set -euo pipefail
 
 PROFILE_ROOT=${PROFILE_ROOT:-$HOME/.config/opencode/profiles}
+SKILLS_DIR=${SKILLS_DIR:-$HOME/.config/opencode/skills}
+GENERATED_ROOT="$PROFILE_ROOT/generated"
 
 # One source of truth for provider wiring. Secrets stay as {env:...}/{file:...}
 # references; never put a literal key here.
@@ -89,6 +97,8 @@ PLUGINS_WORKER_LITE="[\"$PONYTAIL\"]"
 PLUGINS_WORKER_FULL="[\"$PONYTAIL\", \"$SUPERPOWERS\", \"$CAVEMAN\"]"
 PLUGINS_MANAGER_BARE='[]'
 
+die() { echo "$*" >&2; exit 1; }
+
 plugins_for() {
   case $1 in
     worker-lite)   echo "$PLUGINS_WORKER_LITE" ;;
@@ -109,6 +119,88 @@ generate() {
 }
 JSON
   echo "wrote $dir/opencode.json"
+}
+
+# Comma-separated names -> compact JSON array. Empty means no names.
+json_list() {
+  command -v jq >/dev/null || die "jq is required to generate an agent profile"
+  if [ -z "$1" ]; then
+    echo '[]'
+  else
+    printf '%s' "$1" | jq -Rc 'split(",") | map(select(length > 0))'
+  fi
+}
+
+# Explicit per-agent selection. Writes only under profiles/generated/<slug>/.
+generate_agent() {
+  local slug=$1 skills_csv=$2 plugins_csv=$3
+  [[ "$slug" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "invalid agent slug '$slug'"
+  local base="$GENERATED_ROOT/$slug"
+  local dir="$base/opencode"
+  local skills_json plugins_json name
+
+  skills_json=$(json_list "$skills_csv")
+  plugins_json=$(json_list "$plugins_csv")
+
+  # Never write into a directory we did not generate.
+  if [ -e "$base" ] && [ ! -f "$base/generated.json" ]; then
+    die "$base exists but is not a generated profile; refusing to write there"
+  fi
+  mkdir -p "$dir"
+
+  # Skills: symlink the originals. The user's files stay byte-identical; the
+  # generated.json marker labels the whole set as inherited.
+  rm -rf "$dir/skills"
+  if [ "$(echo "$skills_json" | jq 'length')" -gt 0 ]; then
+    mkdir -p "$dir/skills"
+    while IFS= read -r name; do
+      case "$name" in
+        ""|*/*|*..*) die "invalid skill name '$name'" ;;
+      esac
+      [ -f "$SKILLS_DIR/$name/SKILL.md" ] || die "skill '$name' not found under $SKILLS_DIR"
+      ln -s "$SKILLS_DIR/$name" "$dir/skills/$name"
+    done < <(echo "$skills_json" | jq -r '.[]')
+  fi
+
+  # Same PROVIDERS fragment as every hand-written profile: array keys replace,
+  # so a missing fragment would silently drop the provider.
+  jq -n \
+    --argjson plugins "$plugins_json" \
+    --argjson providers "$PROVIDERS" \
+    --arg slug "$slug" \
+    '{ "$schema": "https://opencode.ai/config.json",
+       generated_for: $slug,
+       inherited_skills: true,
+       plugins: $plugins,
+       providers: $providers }' > "$dir/opencode.json"
+
+  jq -n --arg slug "$slug" --argjson skills "$skills_json" --argjson plugins "$plugins_json" \
+    '{ generated_for: $slug, inherited_skills: true, skills: $skills, plugins: $plugins }' \
+    > "$base/generated.json"
+  echo "wrote $dir/opencode.json"
+}
+
+# Parse every generated profile with opencode itself, so --check still proves
+# the file is valid and carries exactly the selected plugin set.
+check_generated() {
+  local rc=0 base name dir expected got
+  [ -d "$GENERATED_ROOT" ] || return 0
+  for base in "$GENERATED_ROOT"/*; do
+    [ -f "$base/generated.json" ] || continue
+    name=$(basename "$base")
+    dir="$base/opencode"
+    expected=$(jq -c '.plugins' "$base/generated.json") || { rc=1; continue; }
+    echo "== generated/$name"
+    got=$(XDG_CONFIG_HOME="$base" opencode debug config --standalone \
+      | jq -c '[.[] | select(.type == "document") | .info.plugins][0] // []') || { rc=1; continue; }
+    if [ "$got" != "$expected" ]; then
+      echo "generated/$name: plugins $got, expected $expected" >&2
+      rc=1
+      continue
+    fi
+    echo "generated/$name: plugins $got"
+  done
+  return "$rc"
 }
 
 check() {
@@ -135,11 +227,26 @@ check() {
     fi
     echo "$name: plugins $got"
   done
+  check_generated || rc=1
   return "$rc"
 }
 
-if [ "${1:-}" = "--check" ]; then
-  check
-else
-  for name in "${PROFILE_NAMES[@]}"; do generate "$name"; done
-fi
+case "${1:-}" in
+  "") for name in "${PROFILE_NAMES[@]}"; do generate "$name"; done ;;
+  --check) check ;;
+  --agent)
+    slug=${2:-}
+    shift 2 || die "usage: $0 --agent <slug> [--skills a,b] [--plugins x,y]"
+    skills=""
+    plugins=""
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --skills) skills=${2:-}; shift 2 ;;
+        --plugins) plugins=${2:-}; shift 2 ;;
+        *) die "unknown option '$1' (expected --skills or --plugins)" ;;
+      esac
+    done
+    generate_agent "$slug" "$skills" "$plugins"
+    ;;
+  *) die "usage: $0 [--check | --agent <slug> --skills a,b --plugins x,y]" ;;
+esac

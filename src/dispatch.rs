@@ -156,7 +156,7 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
             manager,
             workers,
         } => {
-            {
+            let toggles = {
                 let conn = db.lock().unwrap();
                 if !db::try_start_agent(&conn, manager.id)? {
                     return Ok(());
@@ -168,7 +168,8 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
                     Some(manager.id),
                     &format!("{} picked up {}", manager.slug, ticket.ref_),
                 )?;
-            }
+                db::agent_toggles(&conn, &manager.slug)?
+            };
 
             let prompt = manager_prompt(&ticket, &division, &manager, &workers, max_subtasks);
             let ctx = JobCtx {
@@ -178,8 +179,11 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
                 ticket_ref: ticket.ref_.clone(),
                 ticket_title: ticket.title.clone(),
                 log_path: log_file(&db, &ticket.ref_),
+                toggles: toggles.clone(),
             };
+            let started = chrono::Utc::now();
             let result = adapters::run_agent(&manager, &prompt, &ctx).await;
+            record_run(&db, &manager, &toggles, started);
 
             {
                 let conn = db.lock().unwrap();
@@ -201,7 +205,7 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
             division,
             agent,
         } => {
-            {
+            let toggles = {
                 let conn = db.lock().unwrap();
                 if !db::try_start_agent(&conn, agent.id)? {
                     return Ok(());
@@ -217,7 +221,8 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
                     Some(agent.id),
                     &format!("{} started {}", agent.slug, ticket.ref_),
                 )?;
-            }
+                db::agent_toggles(&conn, &agent.slug)?
+            };
 
             let prompt = worker_prompt(&ticket, &division, &agent);
             let ctx = JobCtx {
@@ -227,8 +232,11 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
                 ticket_ref: ticket.ref_.clone(),
                 ticket_title: ticket.title.clone(),
                 log_path: log_file(&db, &ticket.ref_),
+                toggles: toggles.clone(),
             };
+            let started = chrono::Utc::now();
             let result = adapters::run_agent(&agent, &prompt, &ctx).await;
+            record_run(&db, &agent, &toggles, started);
 
             {
                 let conn = db.lock().unwrap();
@@ -257,6 +265,27 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
                 }
             }
         }
+    }
+}
+
+/// Record what opencode's log says the run loaded. Evidence is advisory: a
+/// failure to store it must not change the ticket outcome.
+fn record_run(
+    db: &Db,
+    agent: &Agent,
+    toggles: &db::AgentToggles,
+    started: chrono::DateTime<chrono::Utc>,
+) {
+    let found = adapters::collect_evidence(agent, toggles, started);
+    let run = db::LastRun {
+        honoured: found.honoured,
+        evidence: found.evidence,
+        at: started.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        reason: found.reason,
+    };
+    let conn = db.lock().unwrap();
+    if let Err(e) = db::record_agent_run(&conn, &agent.slug, &run, &toggles.mode) {
+        eprintln!("record run evidence for {}: {e}", agent.slug);
     }
 }
 

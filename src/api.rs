@@ -510,7 +510,7 @@ fn agent_detail_json(conn: &rusqlite::Connection, slug: &str) -> Result<Value, A
                 "stale": found.stale(),
             },
         },
-        "last_run": null,
+        "last_run": db::last_agent_run(conn, slug)?,
     }))
 }
 

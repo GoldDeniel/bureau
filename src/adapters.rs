@@ -1,7 +1,9 @@
 //! Agent adapters: how Bureau actually runs a manager or worker.
-use crate::db::Agent;
+use crate::db::{Agent, AgentToggles};
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::{DateTime, Utc};
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -22,6 +24,8 @@ pub struct JobCtx {
     pub ticket_title: String,
     /// Where to mirror the agent's stdout/stderr while it runs ("" = no file).
     pub log_path: String,
+    /// This agent's skill/plugin selection; drives the child's config dir.
+    pub toggles: AgentToggles,
 }
 
 /// Hard cap for agent output kept in the database. Managers answer with a JSON
@@ -88,11 +92,7 @@ async fn dispatch(agent: &Agent, prompt: &str, ctx: &JobCtx) -> Result<String> {
             run_cmd("hermes", &args, None, prompt, ctx, agent).await
         }
         "opencode" => {
-            let mut args = vec!["run".to_string(), prompt.to_string(), "--auto".to_string()];
-            if !agent.model.is_empty() {
-                args.push("--model".to_string());
-                args.push(agent.model.clone());
-            }
+            let args = opencode_args(agent, prompt, &ctx.toggles);
             run_cmd(
                 "opencode",
                 &args,
@@ -124,6 +124,21 @@ async fn dispatch(agent: &Agent, prompt: &str, ctx: &JobCtx) -> Result<String> {
 
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r#"'"'"'"#))
+}
+
+/// opencode args. Inherit stays byte-identical to the pre-toggles command;
+/// explicit adds `--standalone` because the shared background service loads
+/// its config once, ignoring this run's XDG_CONFIG_HOME.
+fn opencode_args(agent: &Agent, prompt: &str, toggles: &AgentToggles) -> Vec<String> {
+    let mut args = vec!["run".to_string(), prompt.to_string(), "--auto".to_string()];
+    if toggles.mode == "explicit" {
+        args.push("--standalone".to_string());
+    }
+    if !agent.model.is_empty() {
+        args.push("--model".to_string());
+        args.push(agent.model.clone());
+    }
+    args
 }
 
 /// Resolve an adapter binary even when the service PATH is minimal.
@@ -182,6 +197,160 @@ fn plugin_env(
     (!name.is_empty()).then(|| ("XDG_CONFIG_HOME", root.join(name)))
 }
 
+/// Where the child's opencode config comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigHome {
+    /// Leave XDG_CONFIG_HOME alone: the global config, exactly as before toggles.
+    Inherit,
+    /// A complete, user-authored profile directory.
+    Profile(PathBuf),
+    /// A directory generated for this agent's explicit selection.
+    Generated {
+        dir: PathBuf,
+        skills: Vec<String>,
+        plugins: Vec<String>,
+    },
+}
+
+/// Decide the config dir without touching disk. Explicit wins over the legacy
+/// plugin_profile; an opencode child with neither keeps today's environment.
+pub fn config_home(agent: &Agent, toggles: &AgentToggles, root: &Path) -> Result<ConfigHome> {
+    if agent.adapter != "opencode" {
+        return Ok(ConfigHome::Inherit);
+    }
+    if toggles.mode == "explicit" {
+        let slug = agent.slug.trim();
+        if slug.is_empty() || slug.contains('/') || slug.contains("..") {
+            bail!("agent slug '{slug}' cannot name a generated profile");
+        }
+        return Ok(ConfigHome::Generated {
+            dir: root.join("generated").join(slug),
+            skills: toggles.skills.clone(),
+            plugins: toggles.plugins.clone(),
+        });
+    }
+    Ok(match plugin_env(agent.plugin_profile.as_deref(), root) {
+        Some((_, dir)) => ConfigHome::Profile(dir),
+        None => ConfigHome::Inherit,
+    })
+}
+
+fn apply_config_home(cmd: &mut std::process::Command, home: &ConfigHome) {
+    match home {
+        ConfigHome::Inherit => {}
+        ConfigHome::Profile(dir) | ConfigHome::Generated { dir, .. } => {
+            cmd.env("XDG_CONFIG_HOME", dir);
+        }
+    }
+}
+
+/// The generator script: an env override, then the working tree, then the
+/// directory next to the binary. Missing means explicit runs fail loudly.
+fn profiles_script() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("BUREAU_PROFILES_SCRIPT") {
+        return Some(PathBuf::from(path));
+    }
+    let mut candidates = vec![
+        PathBuf::from("scripts/opencode-profiles.sh"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/opencode-profiles.sh"),
+    ];
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join("scripts/opencode-profiles.sh"));
+        if let Some(up) = dir.parent() {
+            candidates.push(up.join("scripts/opencode-profiles.sh"));
+        }
+    }
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn csv(names: &[String]) -> String {
+    names.join(",")
+}
+
+/// A generated dir is current when its marker names this agent and exactly
+/// this selection. Anything else (missing, stale, hand-edited) regenerates.
+fn selection_is_current(dir: &Path, slug: &str, skills: &[String], plugins: &[String]) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("generated.json")) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let names = |key: &str| -> Vec<String> {
+        value
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let sorted = |mut names: Vec<String>| {
+        names.sort();
+        names
+    };
+    value.get("generated_for").and_then(|v| v.as_str()) == Some(slug)
+        && sorted(names("skills")) == sorted(skills.to_vec())
+        && sorted(names("plugins")) == sorted(plugins.to_vec())
+}
+
+/// Regenerate the agent's directory when the selection changed. Never writes
+/// into a user-authored profile: the script refuses a dir without its marker.
+async fn ensure_generated(
+    root: &Path,
+    slug: &str,
+    skills: &[String],
+    plugins: &[String],
+    dir: &Path,
+) -> Result<()> {
+    if selection_is_current(dir, slug, skills, plugins) {
+        return Ok(());
+    }
+    let script = profiles_script().ok_or_else(|| {
+        anyhow!(
+            "cannot generate opencode profile for '{slug}': \
+             scripts/opencode-profiles.sh not found (set BUREAU_PROFILES_SCRIPT)"
+        )
+    })?;
+    let out = Command::new("bash")
+        .arg(&script)
+        .arg("--agent")
+        .arg(slug)
+        .arg("--skills")
+        .arg(csv(skills))
+        .arg("--plugins")
+        .arg(csv(plugins))
+        .env("PROFILE_ROOT", root)
+        .output()
+        .await
+        .with_context(|| format!("running {}", script.display()))?;
+    if !out.status.success() {
+        let detail = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let first = detail
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("no output");
+        bail!("cannot generate opencode profile for '{slug}': {first}");
+    }
+    if !selection_is_current(dir, slug, skills, plugins) {
+        bail!(
+            "generator for '{slug}' exited 0 but wrote no matching {}",
+            dir.join("generated.json").display()
+        );
+    }
+    Ok(())
+}
+
 async fn run_cmd(
     bin: &str,
     args: &[String],
@@ -204,12 +373,29 @@ async fn run_cmd(
             agent.division_slug.clone().unwrap_or_default(),
         );
     // None leaves XDG_CONFIG_HOME alone: the child keeps today's global config.
-    if agent.adapter == "opencode"
-        && let Some(root) = crate::db::profiles_dir()
-        && let Some((key, value)) = plugin_env(agent.plugin_profile.as_deref(), &root)
-    {
-        cmd.env(key, value);
-    }
+    // Explicit toggles need a generated dir, and a generation failure aborts the
+    // run instead of silently running with the wrong skill/plugin set.
+    let config = match crate::db::profiles_dir() {
+        Some(root) => {
+            let home = config_home(agent, &ctx.toggles, &root)?;
+            if let ConfigHome::Generated {
+                dir,
+                skills,
+                plugins,
+            } = &home
+            {
+                ensure_generated(&root, &agent.slug, skills, plugins, dir).await?;
+            }
+            home
+        }
+        None if agent.adapter == "opencode" && ctx.toggles.mode == "explicit" => bail!(
+            "cannot apply explicit toggles for '{}': no opencode profiles directory \
+             (set HOME or BUREAU_PROFILES_DIR)",
+            agent.slug
+        ),
+        None => ConfigHome::Inherit,
+    };
+    apply_config_home(cmd.as_std_mut(), &config);
     if let Some(dir) = cwd
         && !dir.is_empty()
     {
@@ -311,8 +497,197 @@ async fn tee<R>(
     }
 }
 
-async fn ollama(agent: &Agent, prompt: &str, _ctx: &JobCtx) -> Result<String> {
-    let model = if agent.model.trim().is_empty() {
+// ---------------------------------------------------------------- evidence
+
+/// What opencode's own log says the run loaded. Never guessed: absent log or a
+/// non-opencode adapter yields `honoured: None` plus the reason.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RunEvidence {
+    pub honoured: Option<bool>,
+    pub evidence: Vec<String>,
+    pub reason: Option<String>,
+}
+
+/// opencode writes one global log; XDG_DATA_HOME moves it.
+pub fn opencode_log_path() -> Option<PathBuf> {
+    if let Some(base) = std::env::var_os("XDG_DATA_HOME") {
+        return Some(PathBuf::from(base).join("opencode/log/opencode.log"));
+    }
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".local/share/opencode/log/opencode.log"))
+}
+
+/// Read the lines written since the run started and judge them against the
+/// selection. Overlapping runs share this window; the log is global.
+pub fn collect_evidence(
+    agent: &Agent,
+    toggles: &AgentToggles,
+    since: DateTime<Utc>,
+) -> RunEvidence {
+    if agent.adapter != "opencode" {
+        return RunEvidence {
+            honoured: None,
+            evidence: Vec::new(),
+            reason: Some(format!(
+                "adapter '{}' is not opencode; its log cannot prove the selection",
+                agent.adapter
+            )),
+        };
+    }
+    let Some(path) = opencode_log_path() else {
+        return RunEvidence {
+            honoured: None,
+            evidence: Vec::new(),
+            reason: Some("opencode log path is unknown (HOME and XDG_DATA_HOME unset)".into()),
+        };
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return RunEvidence {
+            honoured: None,
+            evidence: Vec::new(),
+            reason: Some(format!("opencode log not found at {}", path.display())),
+        };
+    };
+    let evidence = evidence_since(&text, since);
+    let (honoured, reason) = judge(&toggles.mode, &toggles.skills, &toggles.plugins, &evidence);
+    RunEvidence {
+        honoured,
+        evidence,
+        reason,
+    }
+}
+
+fn line_time(line: &str) -> Option<DateTime<Utc>> {
+    let raw = line
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix("timestamp="))?;
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|t| t.with_timezone(&Utc))
+}
+
+/// `id=...` / `name=...` from a logfmt line.
+fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.split_whitespace().find_map(|token| {
+        token
+            .strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix('='))
+            .map(|v| v.trim_matches('"'))
+            .filter(|v| !v.is_empty())
+    })
+}
+
+fn evidence_since(text: &str, since: DateTime<Utc>) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let recent = match line_time(line) {
+            Some(at) => at >= since,
+            None => false,
+        };
+        if !recent {
+            continue;
+        }
+        let kind = if line.contains("loading plugin") {
+            "loading plugin"
+        } else if line.contains("loading skill") || line.contains("skill loaded") {
+            "loading skill"
+        } else {
+            continue;
+        };
+        let name = field(line, "id")
+            .or_else(|| field(line, "name"))
+            .unwrap_or("");
+        out.push(if name.is_empty() {
+            kind.to_string()
+        } else {
+            format!("{kind} {name}")
+        });
+    }
+    out
+}
+
+/// Explicit selection is honoured when the log loads nothing outside it and no
+/// selected plugin is missing. Skills are judged only when the log reports them
+/// (opencode 2.2.7 is silent about them, so silence is not evidence of failure).
+fn judge(
+    mode: &str,
+    skills: &[String],
+    plugins: &[String],
+    evidence: &[String],
+) -> (Option<bool>, Option<String>) {
+    if evidence.is_empty() {
+        return (
+            None,
+            Some("no plugin or skill loading lines in opencode.log since the run started".into()),
+        );
+    }
+    if mode != "explicit" {
+        return (Some(true), None);
+    }
+    let loaded = |prefix: &str| -> Vec<&str> {
+        evidence
+            .iter()
+            .filter_map(|line| line.strip_prefix(prefix))
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect()
+    };
+    let loaded_plugins = loaded("loading plugin ");
+    let loaded_skills = loaded("loading skill ");
+
+    if let Some(extra) = loaded_plugins
+        .iter()
+        .find(|name| !plugins.iter().any(|p| p == *name))
+    {
+        return (
+            Some(false),
+            Some(format!(
+                "selection excludes plugin '{extra}' but opencode loaded it"
+            )),
+        );
+    }
+    if loaded_plugins.is_empty()
+        && let Some(missing) = plugins.first()
+    {
+        return (
+            Some(false),
+            Some(format!("selected plugin '{missing}' was not loaded")),
+        );
+    }
+    if let Some(missing) = plugins
+        .iter()
+        .find(|name| !loaded_plugins.iter().any(|l| l == name))
+    {
+        return (
+            Some(false),
+            Some(format!("selected plugin '{missing}' was not loaded")),
+        );
+    }
+    if let Some(extra) = loaded_skills
+        .iter()
+        .find(|name| !skills.iter().any(|s| s == *name))
+    {
+        return (
+            Some(false),
+            Some(format!(
+                "selection excludes skill '{extra}' but opencode loaded it"
+            )),
+        );
+    }
+    if !loaded_skills.is_empty()
+        && let Some(missing) = skills
+            .iter()
+            .find(|name| !loaded_skills.iter().any(|l| l == name))
+    {
+        return (
+            Some(false),
+            Some(format!("selected skill '{missing}' was not loaded")),
+        );
+    }
+    (Some(true), None)
+}
+
+async fn ollama(agent: &Agent, prompt: &str, _ctx: &JobCtx) -> Result<String> {    let model = if agent.model.trim().is_empty() {
         std::env::var("BUREAU_OLLAMA_MODEL").unwrap_or_else(|_| "qwen3.8:27b-ud-gguf".into())
     } else {
         agent.model.clone()
@@ -464,6 +839,179 @@ mod tests {
         );
     }
 
+    fn envs(cmd: &std::process::Command) -> Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> {
+        cmd.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect()
+    }
+
+    fn explicit(skills: &[&str], plugins: &[&str]) -> AgentToggles {
+        AgentToggles {
+            mode: "explicit".into(),
+            skills: skills.iter().map(|s| s.to_string()).collect(),
+            plugins: plugins.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// BUR-29 acceptance: an inherit agent with no profile must spawn with
+    /// exactly the environment it had before toggles existed.
+    #[test]
+    fn inherit_without_profile_leaves_the_environment_untouched() {
+        let mut a = agent("opencode");
+        a.plugin_profile = None;
+        let home = config_home(&a, &AgentToggles::default(), std::path::Path::new("/p")).unwrap();
+        assert_eq!(home, ConfigHome::Inherit);
+
+        let mut cmd = std::process::Command::new("opencode");
+        cmd.env("BUREAU_TICKET", "BUR-1")
+            .env("BUREAU_AGENT", "ada")
+            .env("PATH", "/usr/bin");
+        let before = envs(&cmd);
+        apply_config_home(&mut cmd, &home);
+        assert_eq!(envs(&cmd), before, "inherit must not add or drop env");
+        assert!(
+            envs(&cmd).iter().all(|(key, _)| key != "XDG_CONFIG_HOME"),
+            "inherit must leave XDG_CONFIG_HOME alone"
+        );
+        println!("inherit spawn env unchanged: {:?}", envs(&cmd));
+    }
+
+    #[test]
+    fn inherit_with_profile_still_uses_that_profile() {
+        let mut a = agent("opencode");
+        a.plugin_profile = Some("worker-lite".into());
+        assert_eq!(
+            config_home(&a, &AgentToggles::default(), std::path::Path::new("/p")).unwrap(),
+            ConfigHome::Profile(std::path::PathBuf::from("/p/worker-lite"))
+        );
+    }
+
+    #[test]
+    fn inherit_opencode_args_are_unchanged_but_explicit_runs_standalone() {
+        let mut a = agent("opencode");
+        a.model = "some/model".into();
+        assert_eq!(
+            opencode_args(&a, "do it", &AgentToggles::default()),
+            vec!["run", "do it", "--auto", "--model", "some/model"],
+            "inherit must keep the exact pre-toggles argv"
+        );
+        assert_eq!(
+            opencode_args(&a, "do it", &explicit(&[], &[])),
+            vec![
+                "run",
+                "do it",
+                "--auto",
+                "--standalone",
+                "--model",
+                "some/model"
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_toggles_point_at_the_generated_dir() {
+        let mut a = agent("opencode");
+        a.plugin_profile = Some("worker-lite".into());
+        let toggles = explicit(&["gamma"], &["@dietrichgebert/ponytail"]);
+        let home = config_home(&a, &toggles, std::path::Path::new("/p")).unwrap();
+        assert_eq!(
+            home,
+            ConfigHome::Generated {
+                dir: std::path::PathBuf::from("/p/generated/ada"),
+                skills: vec!["gamma".into()],
+                plugins: vec!["@dietrichgebert/ponytail".into()],
+            }
+        );
+        let mut cmd = std::process::Command::new("opencode");
+        apply_config_home(&mut cmd, &home);
+        assert!(envs(&cmd).iter().any(|(key, value)| {
+            key == "XDG_CONFIG_HOME" && value.as_deref() == Some(std::ffi::OsStr::new("/p/generated/ada"))
+        }));
+        // Non-opencode adapters never get a config override.
+        assert_eq!(
+            config_home(&agent("demo"), &toggles, std::path::Path::new("/p")).unwrap(),
+            ConfigHome::Inherit
+        );
+    }
+
+    #[test]
+    fn a_changed_selection_makes_the_generated_dir_stale() {
+        let dir = std::env::temp_dir().join(format!(
+            "bureau-generated-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("generated.json"),
+            r#"{"generated_for":"ada","skills":["gamma"],"plugins":["p-one"]}"#,
+        )
+        .unwrap();
+        let dir_ref = dir.as_path();
+        assert!(selection_is_current(dir_ref, "ada", &["gamma".into()], &["p-one".into()]));
+        assert!(!selection_is_current(dir_ref, "ada", &[], &["p-one".into()]));
+        assert!(!selection_is_current(dir_ref, "ada", &["gamma".into()], &[]));
+        assert!(!selection_is_current(dir_ref, "forge", &["gamma".into()], &["p-one".into()]));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn evidence_takes_only_lines_after_the_run_started() {
+        let log = concat!(
+            "timestamp=2026-11-13T10:00:00.000Z level=INFO msg=\"loading plugin\" id=old role=cli\n",
+            "timestamp=2026-11-13T10:00:10.000Z level=INFO msg=\"loading plugin\" id=@dietrichgebert/ponytail role=cli\n",
+            "timestamp=2026-11-13T10:00:11.000Z level=INFO message=\"loading plugin\" id=superpowers@git+https://github.com/obra/superpowers.git role=cli\n",
+            "timestamp=2026-11-13T10:00:12.000Z level=INFO msg=\"cli starting\" role=cli\n",
+        );
+        let since = DateTime::parse_from_rfc3339("2026-11-13T10:00:05Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            evidence_since(log, since),
+            vec![
+                "loading plugin @dietrichgebert/ponytail",
+                "loading plugin superpowers@git+https://github.com/obra/superpowers.git",
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_judgement_flags_an_excluded_plugin() {
+        let evidence = vec![
+            "loading plugin superpowers@git+https://github.com/obra/superpowers.git".to_string(),
+        ];
+        let (honoured, reason) = judge(
+            "explicit",
+            &[],
+            &["@dietrichgebert/ponytail".to_string()],
+            &evidence,
+        );
+        assert_eq!(honoured, Some(false));
+        assert!(reason.unwrap().contains("superpowers"));
+    }
+
+    #[test]
+    fn explicit_judgement_accepts_the_selected_plugin() {
+        let evidence = vec!["loading plugin @dietrichgebert/ponytail".to_string()];
+        assert_eq!(
+            judge(
+                "explicit",
+                &[],
+                &["@dietrichgebert/ponytail".to_string()],
+                &evidence
+            )
+            .0,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn absent_evidence_is_unknown_not_a_pass() {
+        assert_eq!(judge("explicit", &[], &[], &[]).0, None);
+        assert_eq!(judge("inherit", &[], &[], &[]).0, None);
+    }
+
     #[test]
     fn long_output_keeps_the_head() {
         let raw = format!(
@@ -487,6 +1035,7 @@ mod tests {
             ticket_ref: "BUR-1".into(),
             ticket_title: "Add grass".into(),
             log_path: String::new(),
+            toggles: AgentToggles::default(),
         };
         let out = run_agent(&agent("demo"), "prompt", &ctx).await.unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
