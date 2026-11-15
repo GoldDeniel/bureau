@@ -66,6 +66,7 @@ fn setup() -> (Router, Db) {
         db: db.clone(),
         dispatching: Arc::new(AtomicBool::new(false)),
         max_parallel: 2,
+        max_subtasks: 3,
         token: None,
     });
     (app, db)

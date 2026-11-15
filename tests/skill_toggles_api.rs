@@ -58,6 +58,7 @@ fn app_for(db: &Db) -> Router {
         db: db.clone(),
         dispatching: Arc::new(AtomicBool::new(false)),
         max_parallel: 2,
+        max_subtasks: 3,
         token: None,
     })
 }

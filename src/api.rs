@@ -341,7 +341,7 @@ async fn resume_division(
 fn set_paused(st: &AppState, slug: &str, paused: bool) -> Result<Json<Value>, ApiError> {
     let conn = st.db.lock().unwrap();
     if db::set_division_paused(&conn, slug, paused)? == 0 {
-        return Err(ApiError(anyhow::anyhow!("division '{slug}' not found")));
+        return Err(ApiError::from(anyhow::anyhow!("division '{slug}' not found")));
     }
     let division = db::divisions(&conn)?
         .into_iter()
