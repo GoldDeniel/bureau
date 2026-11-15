@@ -2,7 +2,7 @@
 %define _build_id_links none
 
 Name:           bureau
-Version:        0.5.3
+Version:        0.5.4
 Release:        1%{?dist}
 Summary:        Ticket system for a company of AI agents
 License:        MIT

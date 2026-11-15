@@ -114,11 +114,17 @@ fn patterns() -> &'static [(FailureKind, &'static [&'static str])] {
             FailureKind::Quota,
             &[
                 "usage limit",
-                "quota",
+                "quota exceeded",
                 "insufficient balance",
-                "credits",
-                "free tier",
+                "insufficient credit",
+                "credits exhausted",
                 "out of tokens",
+                "free usage limit",
+                // "credits" / "free tier" alone match agent prose and domain
+                // code (a model field named Credits, docs about the free
+                // tier). They must only count inside a real quota sentence.
+                "no credits remaining",
+                "tokens remaining",
             ],
         ),
         (
@@ -289,6 +295,18 @@ mod tests {
         let msg = "Error: Free usage limit reached. rate limit: 0 remaining";
         assert_eq!(classify(msg, Some(1)).kind, FailureKind::Quota);
         assert!(classify(msg, Some(1)).kind.is_infrastructure());
+    }
+
+    #[test]
+    fn domain_words_are_not_mistaken_for_a_quota_wall() {
+        // Real false positive from BUR-45: a worker writing C# was killed
+        // mid-edit, and the tail of its output contained a model field called
+        // Credits. Reporting that as a quota wall hides the real cause.
+        let code = r#"var current = new Subject { Code = "JELEN", Name = "Jelenlegi", Credits = 5 };"#;
+        assert_ne!(classify(code, Some(1)).kind, FailureKind::Quota);
+        // Docs prose must not trip it either.
+        let prose = "The free tier is documented in docs/limits.md.";
+        assert_ne!(classify(prose, Some(1)).kind, FailureKind::Quota);
     }
 
     #[test]
