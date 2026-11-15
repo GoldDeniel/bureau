@@ -160,7 +160,9 @@ work, open Agents and switch an adapter to `ollama`, `hermes` or `opencode`.",
     Ok(created)
 }
 
-/// Print the seeded company as a compact tree (used by `bureau init`).
+/// Print the seeded company as a compact tree (used by `bureau init` and
+/// `bureau division list`). An empty database yields an empty string, so
+/// callers that would otherwise go silent must check for that themselves.
 pub fn describe(db: &Db) -> Result<String> {
     let conn = db.lock().unwrap();
     let mut out = String::new();

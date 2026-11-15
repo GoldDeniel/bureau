@@ -138,6 +138,44 @@ CREATE TABLE IF NOT EXISTS agent_plugins (
     updated_at  TEXT NOT NULL,
     PRIMARY KEY (agent_slug, plugin_name)
 );
+
+-- One row per failed agent run, so the board can show WHY a ticket failed
+-- without re-parsing a 14 KB blob, and so the dispatcher can count how often a
+-- given model burned out before rotating away from it.
+CREATE TABLE IF NOT EXISTS attempts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id  INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    agent_id   INTEGER REFERENCES agents(id) ON DELETE SET NULL,
+    agent_slug TEXT NOT NULL DEFAULT '',
+    adapter    TEXT NOT NULL DEFAULT '',
+    model      TEXT NOT NULL DEFAULT '',
+    provider   TEXT NOT NULL DEFAULT '',
+    kind       TEXT NOT NULL DEFAULT 'unknown',
+    detail     TEXT NOT NULL DEFAULT '',
+    -- the full message, kept for the expandable view; never parsed again
+    raw        TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS attempts_by_ticket ON attempts(ticket_id, id DESC);
+CREATE INDEX IF NOT EXISTS attempts_by_kind   ON attempts(kind, id DESC);
+-- Rotation needs "how recently did this model fail", so that index is on
+-- the (provider, model) pair rather than the agent.
+CREATE INDEX IF NOT EXISTS attempts_by_model  ON attempts(provider, model, id DESC);
+
+-- An agent's fallback ladder: try the primary, then each entry in turn.
+-- `position` orders them; `cooldown_until` lets the dispatcher skip a provider
+-- that is known-bad right now instead of rediscovering it per ticket.
+CREATE TABLE IF NOT EXISTS agent_models (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id      INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    position      INTEGER NOT NULL DEFAULT 0,
+    provider      TEXT NOT NULL DEFAULT '',
+    model         TEXT NOT NULL DEFAULT '',
+    adapter       TEXT NOT NULL DEFAULT '',
+    cooldown_until TEXT,
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_models_by_agent ON agent_models(agent_id, position);
 "#;
 
 pub fn open(path: &str) -> Result<Db> {
@@ -212,6 +250,35 @@ pub struct Agent {
     pub enabled: bool,
     pub status: String,
     pub created_at: String,
+}
+
+/// One failed run of one agent, already classified.
+#[derive(Debug, Clone, Serialize)]
+pub struct Attempt {
+    pub id: i64,
+    pub ticket_id: i64,
+    pub agent_slug: String,
+    pub adapter: String,
+    pub model: String,
+    pub provider: String,
+    /// A `FailureKind` string; kept as text so old rows never break the enum.
+    pub kind: String,
+    /// The one line that explained the failure — what the board shows.
+    pub detail: String,
+    pub raw: String,
+    pub created_at: String,
+}
+
+/// One rung of an agent's fallback ladder.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentModel {
+    pub id: i64,
+    pub position: i64,
+    pub provider: String,
+    pub model: String,
+    pub adapter: String,
+    /// Set when this rung failed recently; the dispatcher skips it until then.
+    pub cooldown_until: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -1397,6 +1464,198 @@ pub fn rollup_parent(conn: &Connection, child_id: i64) -> Result<()> {
         add_event(conn, "rollup", Some(pid), None, "all sub-tickets finished")?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------- failures
+
+/// Record a classified failure. Called once per failed agent run.
+#[allow(clippy::too_many_arguments)]
+pub fn record_attempt(
+    conn: &Connection,
+    ticket_id: i64,
+    agent: &Agent,
+    provider: &str,
+    kind: &str,
+    detail: &str,
+    raw: &str,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO attempts
+            (ticket_id, agent_id, agent_slug, adapter, model, provider, kind, detail, raw, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            ticket_id,
+            agent.id,
+            agent.slug,
+            agent.adapter,
+            agent.model,
+            provider,
+            kind,
+            detail,
+            raw,
+            now()
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Attempts for one ticket, newest first — the board's "why did this fail".
+pub fn attempts_for(conn: &Connection, ticket_id: i64, limit: i64) -> Result<Vec<Attempt>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, ticket_id, agent_slug, adapter, model, provider, kind, detail, raw, created_at
+         FROM attempts WHERE ticket_id=?1 ORDER BY id DESC LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![ticket_id, limit.clamp(1, 200)], map_attempt)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// The most recent attempt on any ticket, used to label a failed card without
+/// loading every attempt for every ticket in the snapshot.
+pub fn latest_attempts(conn: &Connection) -> Result<std::collections::HashMap<i64, Attempt>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.ticket_id, a.agent_slug, a.adapter, a.model, a.provider,
+                a.kind, a.detail, a.raw, a.created_at
+         FROM attempts a
+         JOIN (SELECT ticket_id, MAX(id) AS mid FROM attempts GROUP BY ticket_id) m
+           ON m.mid = a.id",
+    )?;
+    let rows = stmt
+        .query_map([], map_attempt)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().map(|a| (a.ticket_id, a)).collect())
+}
+
+fn map_attempt(row: &Row) -> rusqlite::Result<Attempt> {
+    Ok(Attempt {
+        id: row.get(0)?,
+        ticket_id: row.get(1)?,
+        agent_slug: row.get(2)?,
+        adapter: row.get(3)?,
+        model: row.get(4)?,
+        provider: row.get(5)?,
+        kind: row.get(6)?,
+        detail: row.get(7)?,
+        raw: row.get(8)?,
+        created_at: row.get(9)?,
+    })
+}
+
+/// How many times a distinct ticket failed with this kind in the last window.
+/// Used for the board's per-kind counts; a ticket that failed ten times still
+/// counts once, so one bad ticket cannot look like a systemic outage.
+pub fn failure_counts(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, COUNT(DISTINCT ticket_id) FROM attempts
+         GROUP BY kind ORDER BY COUNT(DISTINCT ticket_id) DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+// -------------------------------------------------- per-agent model ladders
+
+/// Replace an agent's whole ladder in one transaction. Order is the order the
+/// dispatcher tries them in, so `position` follows the submitted index.
+pub fn set_agent_models(
+    conn: &mut Connection,
+    agent_id: i64,
+    rungs: &[(String, String, String)],
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM agent_models WHERE agent_id=?1", [agent_id])?;
+    for (i, (provider, model, adapter)) in rungs.iter().enumerate() {
+        if provider.trim().is_empty() && model.trim().is_empty() {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO agent_models (agent_id, position, provider, model, adapter, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![agent_id, i as i64, provider.trim(), model.trim(), adapter.trim(), now()],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn agent_models(conn: &Connection, agent_id: i64) -> Result<Vec<AgentModel>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, position, provider, model, adapter, cooldown_until
+         FROM agent_models WHERE agent_id=?1 ORDER BY position, id",
+    )?;
+    let rows = stmt
+        .query_map([agent_id], |r| {
+            Ok(AgentModel {
+                id: r.get(0)?,
+                position: r.get(1)?,
+                provider: r.get(2)?,
+                model: r.get(3)?,
+                adapter: r.get(4)?,
+                cooldown_until: r.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Every agent's ladder, keyed by agent id, for the snapshot.
+pub fn all_agent_models(conn: &Connection) -> Result<std::collections::HashMap<i64, Vec<AgentModel>>> {
+    let mut stmt = conn.prepare(
+        "SELECT agent_id, id, position, provider, model, adapter, cooldown_until
+         FROM agent_models ORDER BY agent_id, position, id",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                AgentModel {
+                    id: r.get(1)?,
+                    position: r.get(2)?,
+                    provider: r.get(3)?,
+                    model: r.get(4)?,
+                    adapter: r.get(5)?,
+                    cooldown_until: r.get(6)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut out: std::collections::HashMap<i64, Vec<AgentModel>> = std::collections::HashMap::new();
+    for (agent_id, m) in rows {
+        out.entry(agent_id).or_default().push(m);
+    }
+    Ok(out)
+}
+
+/// Put a rung on ice. `secs` of 0 clears it (used when a rung succeeds).
+pub fn set_model_cooldown(conn: &Connection, rung_id: i64, secs: i64) -> Result<()> {
+    if secs <= 0 {
+        conn.execute(
+            "UPDATE agent_models SET cooldown_until=NULL WHERE id=?1",
+            [rung_id],
+        )?;
+    } else {
+        let until = (chrono::Utc::now() + chrono::Duration::seconds(secs))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        conn.execute(
+            "UPDATE agent_models SET cooldown_until=?1 WHERE id=?2",
+            params![until, rung_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// A rung is usable when it has no cooldown, or the cooldown has expired.
+/// Cooldowns are compared as text, which is safe because `now()` and the
+/// cooldown absolute time share the same sortable format.
+pub fn rung_available(rung: &AgentModel, now_iso: &str) -> bool {
+    match &rung.cooldown_until {
+        None => true,
+        Some(until) => until.as_str() <= now_iso,
+    }
 }
 
 // ---------------------------------------------------------------- comments & events

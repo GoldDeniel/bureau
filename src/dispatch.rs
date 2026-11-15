@@ -1,6 +1,7 @@
 //! The company loop: managers triage new tickets, workers execute delegated ones.
 use crate::adapters::{self, JobCtx, JobKind};
 use crate::db::{self, Agent, Db, Division, Ticket};
+use crate::{failure, rotation};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -181,9 +182,8 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
                 log_path: log_file(&db, &ticket.ref_),
                 toggles: toggles.clone(),
             };
-            let started = chrono::Utc::now();
-            let result = adapters::run_agent(&manager, &prompt, &ctx).await;
-            record_run(&db, &manager, &toggles, started);
+            let result =
+                run_with_ladder(&db, &ticket, &manager, &prompt, &ctx, &toggles).await;
 
             {
                 let conn = db.lock().unwrap();
@@ -194,10 +194,7 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
                 Ok(output) => {
                     apply_plan(&db, &ticket, &division, &manager, &workers, &output, max_subtasks).await
                 }
-                Err(e) => {
-                    let msg = format!("manager {} failed: {e}", manager.slug);
-                    fail_ticket(&db, &ticket, &msg, fatal_error(&msg)).await
-                }
+                Err(failure) => handled_failure(&db, &ticket, &manager, failure).await,
             }
         }
         Job::Worker {
@@ -234,9 +231,7 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
                 log_path: log_file(&db, &ticket.ref_),
                 toggles: toggles.clone(),
             };
-            let started = chrono::Utc::now();
-            let result = adapters::run_agent(&agent, &prompt, &ctx).await;
-            record_run(&db, &agent, &toggles, started);
+            let result = run_with_ladder(&db, &ticket, &agent, &prompt, &ctx, &toggles).await;
 
             {
                 let conn = db.lock().unwrap();
@@ -259,10 +254,7 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
                     db::rollup_parent(&conn, ticket.id)?;
                     Ok(())
                 }
-                Err(e) => {
-                    let msg = format!("worker {} failed: {e}", agent.slug);
-                    fail_ticket(&db, &ticket, &msg, fatal_error(&msg)).await
-                }
+                Err(failure) => handled_failure(&db, &ticket, &agent, failure).await,
             }
         }
     }
@@ -289,22 +281,157 @@ fn record_run(
     }
 }
 
-/// Errors that will fail the same way on every retry: a quota wall or a broken
-/// credential does not get better in 20 seconds, and retrying it three times per
-/// sub-ticket just fills the board with failures.
-fn fatal_error(message: &str) -> bool {
-    let m = message.to_lowercase();
-    [
-        "usage limit",
-        "quota",
-        "rate limit",
-        "unauthorized",
-        "invalid api key",
-        "authentication",
-        "no such file",
-    ]
-    .iter()
-    .any(|needle| m.contains(needle))
+/// A failed run, already classified and already recorded.
+#[derive(Debug)]
+struct Failure {
+    kind: failure::FailureKind,
+    detail: String,
+    /// The full agent output, for the ticket comment and the expandable view.
+    raw: String,
+}
+
+impl Failure {
+    /// The ticket-facing message: one readable line, not 14 KB of narration.
+    fn summary(&self, agent: &Agent) -> String {
+        format!(
+            "{} {} failed: [{}] {}",
+            if agent.role == "manager" { "manager" } else { "worker" },
+            agent.slug,
+            self.kind.as_str(),
+            self.detail
+        )
+    }
+}
+
+/// Run one job, walking the agent's model ladder when the failure is the
+/// provider's fault.
+///
+/// The ladder is the agent's primary `adapter`/`model` pair followed by every
+/// rung in `agent_models`. A rung that fails for an infrastructure reason is
+/// put on cooldown so the next ticket does not rediscover the same dead
+/// provider, and the call advances to the next usable rung.
+///
+/// A failure that might have left the repository half-changed never rotates:
+/// see `rotation::decide`, which parks it for a human instead.
+async fn run_with_ladder(
+    db: &Db,
+    ticket: &Ticket,
+    agent: &Agent,
+    prompt: &str,
+    ctx: &JobCtx,
+    toggles: &db::AgentToggles,
+) -> Result<String, Failure> {
+    let rungs = {
+        let conn = db.lock().unwrap();
+        db::agent_models(&conn, agent.id).unwrap_or_default()
+    };
+    let now = db::now();
+    let usable: Vec<db::AgentModel> = rungs
+        .into_iter()
+        .filter(|r| db::rung_available(r, &now))
+        .collect();
+
+    let mut attempt: u32 = 0;
+    let mut index: usize = 0;
+
+    loop {
+        attempt += 1;
+        // Rung 0 is the agent's own adapter/model; later rungs override both.
+        let mut tried = agent.clone();
+        if let Some(rung) = usable.get(index) {
+            if !rung.adapter.is_empty() {
+                tried.adapter = rung.adapter.clone();
+            }
+            if !rung.model.is_empty() {
+                tried.model = rung.model.clone();
+            }
+        }
+        let provider = rotation::provider_of(&tried.model);
+        let started = chrono::Utc::now();
+
+        match adapters::run_agent(&tried, prompt, ctx).await {
+            Ok(output) => {
+                // Evidence is about the process that actually ran: the rung may
+                // have swapped adapter and model away from the agent's primary.
+                record_run(db, &tried, toggles, started);
+                // The rung works again: clear any stale cooldown.
+                if let Some(rung) = usable.get(index) {
+                    let conn = db.lock().unwrap();
+                    let _ = db::set_model_cooldown(&conn, rung.id, 0);
+                }
+                return Ok(output);
+            }
+            Err(e) => {
+                let raw = e.to_string();
+                let classified = failure::classify(&raw, None);
+                let has_next = index + 1 < usable.len();
+                let action = rotation::decide(classified.kind, attempt, has_next);
+
+                {
+                    let conn = db.lock().unwrap();
+                    let _ = db::record_attempt(
+                        &conn,
+                        ticket.id,
+                        &tried,
+                        provider,
+                        classified.kind.as_str(),
+                        &classified.detail,
+                        &raw,
+                    );
+                    if let Some(rung) = usable.get(index) {
+                        let secs = rotation::cooldown_secs(classified.kind);
+                        if secs > 0 {
+                            let _ = db::set_model_cooldown(&conn, rung.id, secs);
+                        }
+                    }
+                }
+
+                let current = Failure {
+                    kind: classified.kind,
+                    detail: classified.detail,
+                    raw,
+                };
+
+                match action {
+                    // Same rung again: a rate-limit blip is often gone by the
+                    // time the process has torn down.
+                    rotation::Action::RetrySame => continue,
+                    rotation::Action::Rotate => {
+                        // Say which model is being skipped and why, on the
+                        // ticket, so the board reads as a chain of attempts.
+                        {
+                            let conn = db.lock().unwrap();
+                            let _ = db::add_event(
+                                &conn,
+                                "rotate",
+                                Some(ticket.id),
+                                Some(agent.id),
+                                &format!(
+                                    "{}: {} on {} — rotating to the next model",
+                                    agent.slug,
+                                    current.kind.as_str(),
+                                    if tried.model.is_empty() { "adapter default" } else { &tried.model }
+                                ),
+                            );
+                        }
+                        index += 1;
+                        attempt = 0; // a fresh rung gets its own single retry
+                        continue;
+                    }
+                    rotation::Action::Park => {
+                        return Err(Failure {
+                            detail: format!(
+                                "{} — stopped without retrying: the run may have left changes in the repo",
+                                current.detail
+                            ),
+                            ..current
+                        });
+                    }
+                    rotation::Action::Fail => return Err(current),
+                }
+            }
+        }
+    }
 }
 
 fn mark_failed(
@@ -334,9 +461,33 @@ fn mark_failed(
     Ok(())
 }
 
-async fn fail_ticket(db: &Db, ticket: &Ticket, message: &str, force: bool) -> Result<()> {
+/// Finish a failed run: record the classified reason on the ticket, keep the
+/// full output in a comment, and move the ticket on.
+///
+/// `Park` (timeout / bad model output) always goes straight to `failed`: the
+/// ticket may correspond to half-finished work, and the 3-ticket comment budget
+/// below must not be spent silently re-running something that already edited
+/// files. Infrastructure failures keep the old budget so a transient blip does
+/// not need a human.
+async fn handled_failure(db: &Db, ticket: &Ticket, agent: &Agent, failure: Failure) -> Result<()> {
+    let message = failure.summary(agent);
+    let park = !failure.kind.is_infrastructure()
+        && matches!(
+            failure.kind,
+            failure::FailureKind::Timeout | failure::FailureKind::ModelOutput
+        );
     let conn = db.lock().unwrap();
-    mark_failed(&conn, ticket, message, force)
+    // The full output still goes somewhere a person can read it — but as a
+    // comment, not as the one-line reason on the card.
+    if !failure.raw.is_empty() {
+        db::add_comment(
+            &conn,
+            ticket.id,
+            &format!("bureau:output:{}", agent.slug),
+            &failure.raw,
+        )?;
+    }
+    mark_failed(&conn, ticket, &message, park)
 }
 
 /// Job log path next to the database: `<db dir>/logs/<ref>.log`.
@@ -987,12 +1138,35 @@ mod tests {
     }
 
     #[test]
-    fn fatal_failures_are_recognised() {
-        assert!(fatal_error(
-            "worker forge failed: 'opencode' exited 1: Error: Free usage limit reached."
-        ));
-        assert!(fatal_error("manager mira failed: invalid api key"));
-        assert!(!fatal_error("worker forge failed: timed out after 600s"));
+    fn a_failure_is_classified_and_summarised_in_one_line() {
+        // The old fatal_error() only answered yes/no; the tag has to survive
+        // into the ticket message or the board cannot group failures.
+        let f = Failure {
+            kind: failure::FailureKind::Quota,
+            detail: "Error: Free usage limit reached.".into(),
+            raw: "x".repeat(5000),
+        };
+        let msg = f.summary(&agent("forge"));
+        assert!(msg.contains("[quota]"), "message was {msg:?}");
+        assert!(msg.contains("forge"));
+        assert!(
+            msg.len() < 200,
+            "the summary must stay short even when the raw output is huge"
+        );
+    }
+
+    #[test]
+    fn a_timeout_is_summarised_as_a_park_not_a_plain_failure() {
+        let f = Failure {
+            kind: failure::FailureKind::Timeout,
+            detail: "timed out after 7200s".into(),
+            raw: String::new(),
+        };
+        assert_eq!(
+            rotation::decide(f.kind, 1, true),
+            rotation::Action::Park,
+            "a run that may have committed must not rotate"
+        );
     }
 
     #[test]

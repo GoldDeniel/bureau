@@ -42,6 +42,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/agents", get(list_agents).post(create_agent))
         .route(
+            "/api/agents/{slug}/models",
+            get(get_agent_models).put(put_agent_models),
+        )
+        .route(
             "/api/agents/{slug}",
             get(agent_detail).patch(patch_agent).delete(delete_agent),
         )
@@ -229,15 +233,24 @@ struct Stats {
 }
 
 async fn snapshot(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let (divisions, agents, tickets, events) = {
+    let (divisions, agents, tickets, events, latest, failures, ladders) = {
         let conn = st.db.lock().unwrap();
         (
             db::divisions(&conn)?,
             db::agents(&conn, None)?,
             db::tickets(&conn, None, None, 1000)?,
             db::events(&conn, 40)?,
+            // One attempt per ticket is enough to label a card; the full list
+            // comes from GET /api/tickets/{key} when the drawer opens.
+            db::latest_attempts(&conn)?,
+            db::failure_counts(&conn)?,
+            db::all_agent_models(&conn)?,
         )
     };
+    let failure_totals: serde_json::Map<String, Value> = failures
+        .into_iter()
+        .map(|(kind, n)| (kind, json!(n)))
+        .collect();
     let stats = Stats {
         divisions: divisions.len(),
         agents: agents.len(),
@@ -283,6 +296,16 @@ async fn snapshot(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
         "events": events,
         "live": running,
         "stats": stats,
+        // ticket_id -> its most recent classified failure
+        "attempts": latest,
+        // failure kind -> number of distinct tickets affected
+        "failure_totals": failure_totals,
+        // agent_id -> ordered fallback ladder
+        "ladders": ladders,
+        "failure_kinds": [
+            "rate_limit", "quota", "auth", "provider_down", "content_safety",
+            "timeout", "tooling", "model_output", "unknown"
+        ],
         "statuses": STATUSES,
         "adapters": ["demo", "ollama", "hermes", "opencode", "shell", "echo"],
         "dispatching": st.dispatching.load(Ordering::SeqCst),
@@ -765,8 +788,73 @@ async fn update_agent_skills(
 
 async fn get_discovery() -> Json<Value> {
     Json(discovery::get().to_json())
-}async fn refresh_discovery() -> Json<Value> {
+}
+
+async fn refresh_discovery() -> Json<Value> {
     Json(discovery::refresh().to_json())
+}
+
+/// One rung of an agent's fallback ladder, as submitted by the board.
+#[derive(Deserialize)]
+struct ModelRung {
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    adapter: String,
+}
+
+#[derive(Deserialize)]
+struct PutModels {
+    models: Vec<ModelRung>,
+}
+
+async fn get_agent_models(
+    State(st): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = st.db.lock().unwrap();
+    let agent = db::agent_by_slug(&conn, &slug)?
+        .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    Ok(Json(json!({
+        "agent": agent.slug,
+        "models": db::agent_models(&conn, agent.id)?,
+    })))
+}
+
+/// Replace an agent's ladder wholesale. Order is priority: index 0 is tried
+/// first. An empty list means "no fallbacks — use the agent's own model".
+async fn put_agent_models(
+    State(st): State<AppState>,
+    Path(slug): Path<String>,
+    Json(body): Json<PutModels>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = st.db.lock().unwrap();
+    let agent = db::agent_by_slug(&conn, &slug)?
+        .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
+    let rungs: Vec<(String, String, String)> = body
+        .models
+        .iter()
+        .map(|r| {
+            // A rung without a provider inherits the model spec's own prefix, so
+            // the board does not have to repeat it.
+            let provider = if r.provider.trim().is_empty() {
+                match r.model.split_once('/') {
+                    Some((p, _)) => p.to_string(),
+                    None => "local".to_string(),
+                }
+            } else {
+                r.provider.clone()
+            };
+            (provider, r.model.clone(), r.adapter.clone())
+        })
+        .collect();
+    db::set_agent_models(&mut conn, agent.id, &rungs)?;
+    Ok(Json(json!({
+        "agent": agent.slug,
+        "models": db::agent_models(&conn, agent.id)?,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -947,7 +1035,14 @@ async fn get_ticket(
     let conn = st.db.lock().unwrap();
     let ticket = ticket_or_404!(conn, key);
     let comments = db::comments(&conn, ticket.id)?;
-    Ok(Json(json!({ "ticket": ticket, "comments": comments })))
+    // Why this ticket failed, newest first. The board shows the kind as a tag
+    // and the detail as the one line that explained it.
+    let attempts = db::attempts_for(&conn, ticket.id, 50)?;
+    Ok(Json(json!({
+        "ticket": ticket,
+        "comments": comments,
+        "attempts": attempts,
+    })))
 }
 
 #[derive(Deserialize)]

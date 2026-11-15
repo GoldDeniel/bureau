@@ -77,7 +77,27 @@ async fn dispatch(agent: &Agent, prompt: &str, ctx: &JobCtx) -> Result<String> {
         "echo" => Ok(prompt.to_string()),
         "ollama" => ollama(agent, prompt, ctx).await,
         "hermes" => {
-            let mut args = vec!["-z".to_string(), prompt.to_string()];
+            // Continue one stable, named session per agent instead of a bare
+            // one-shot, which creates a fresh untitled session for every job
+            // and floods the app's session list with unknowns. `chat -q` with
+            // --oneshot keeps the scripted stdout contract; -c <name> plus
+            // --create-if-missing makes the first job create the session and
+            // later jobs resume it.
+            //
+            // Safe only because Bureau runs at most one job per agent (see
+            // db::try_start_agent, which flips idle -> running atomically). A
+            // resumed session is not concurrency-safe: do not run two jobs for
+            // one agent, and do not rename a session under a live job.
+            let mut args = vec![
+                "chat".to_string(),
+                "-q".to_string(),
+                prompt.to_string(),
+                "--oneshot".to_string(),
+                "-Q".to_string(),
+                "-c".to_string(),
+                agent_session_name(agent),
+                "--create-if-missing".to_string(),
+            ];
             if !ctx.project_path.is_empty() {
                 args.push("--in".to_string());
                 args.push(ctx.project_path.clone());
@@ -89,9 +109,25 @@ async fn dispatch(agent: &Agent, prompt: &str, ctx: &JobCtx) -> Result<String> {
             if agent.system_hint.contains("yolo") {
                 args.push("--yolo".to_string());
             }
+            // Skills and plugins live in the toggle model. Only the hermes CLI
+            // can be handed them directly; opencode gets a generated config dir
+            // instead. An inheriting agent gets neither, so its argv stays
+            // byte-identical to the pre-toggles command.
+            if ctx.toggles.mode == "explicit" {
+                for skill in &ctx.toggles.skills {
+                    args.push("--skill".to_string());
+                    args.push(skill.clone());
+                }
+                for plugin in &ctx.toggles.plugins {
+                    args.push("--plugin".to_string());
+                    args.push(plugin.clone());
+                }
+            }
             run_cmd("hermes", &args, None, prompt, ctx, agent).await
         }
         "opencode" => {
+            // Toggles decide the config dir and whether this run needs its own
+            // server; see opencode_args and config_home.
             let args = opencode_args(agent, prompt, &ctx.toggles);
             run_cmd(
                 "opencode",
@@ -120,6 +156,17 @@ async fn dispatch(agent: &Agent, prompt: &str, ctx: &JobCtx) -> Result<String> {
         }
         other => bail!("unknown adapter '{other}' (demo|echo|ollama|hermes|opencode|shell)"),
     }
+}
+
+/// The stable Hermes session name for an agent: `bureau:<division>:<agent>`.
+///
+/// One session per agent keeps the agent's history in one place and keeps
+/// concurrent jobs apart — a worker and its division's manager never share a
+/// conversation. A division cannot be the unit because a division runs several
+/// agents in parallel.
+fn agent_session_name(agent: &Agent) -> String {
+    let division = agent.division_slug.as_deref().unwrap_or("none");
+    format!("bureau:{division}:{}", agent.slug)
 }
 
 fn shell_quote(s: &str) -> String {
@@ -1041,6 +1088,22 @@ mod tests {
     fn absent_evidence_is_unknown_not_a_pass() {
         assert_eq!(judge("explicit", &[], &[], &[]).0, None);
         assert_eq!(judge("inherit", &[], &[], &[]).0, None);
+    }
+
+    #[test]
+    fn agent_session_name_is_stable_per_agent() {
+        let a = agent("hermes");
+        assert_eq!(agent_session_name(&a), "bureau:hexa:ada");
+        // Two jobs for the same agent must land in the same session...
+        assert_eq!(agent_session_name(&a), agent_session_name(&agent("hermes")));
+        // ...but a worker must never share the manager's session.
+        let mut w = agent("hermes");
+        w.slug = "bob".into();
+        assert_ne!(agent_session_name(&a), agent_session_name(&w));
+        // An agent with no division still gets a nameable session.
+        let mut orphan = agent("hermes");
+        orphan.division_slug = None;
+        assert_eq!(agent_session_name(&orphan), "bureau:none:ada");
     }
 
     #[test]
