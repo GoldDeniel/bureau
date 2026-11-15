@@ -6,6 +6,11 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
+/// How often the drain loop looks for new work while jobs are still running.
+/// Short enough that triage is not starved by a long worker, long enough that a
+/// big batch does not hammer SQLite.
+const COLLECT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Debug, Default, Serialize)]
 pub struct TickReport {
     pub managers_started: usize,
@@ -65,11 +70,25 @@ pub async fn tick(db: Db, max_parallel: usize, max_subtasks: usize) -> Result<Ti
             }
             continue;
         }
-        match set.join_next().await {
-            Some(Ok(Ok(()))) => {}
-            Some(Ok(Err(e))) => report.errors.push(e.to_string()),
-            Some(Err(e)) => report.errors.push(format!("job panicked: {e}")),
-            None => break,
+        // Race the next completed job against a short collect tick.
+        //
+        // Waiting on join_next() alone means a two-hour worker blocks every
+        // other kind of work: nothing is collected until it settles, so a
+        // manager triage sits in `triaged` for the whole run and the board
+        // looks frozen while one agent thinks. Racing a timer keeps the fleet
+        // honest — a free worker or an untriaged ticket is picked up within
+        // `COLLECT_INTERVAL`, not after the slowest job in the batch.
+        let settled = tokio::select! {
+            done = set.join_next() => match done {
+                Some(Ok(Ok(()))) => { Some(()) }
+                Some(Ok(Err(e))) => { report.errors.push(e.to_string()); Some(()) }
+                Some(Err(e)) => { report.errors.push(format!("job panicked: {e}")); Some(()) }
+                None => None,
+            },
+            _ = tokio::time::sleep(COLLECT_INTERVAL) => Some(()),
+        };
+        if settled.is_none() {
+            break;
         }
         let free = max_parallel.max(1).saturating_sub(set.len());
         if free > 0 {
@@ -204,7 +223,13 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
                 if !db::try_start_agent(&conn, agent.id)? {
                     return Ok(());
                 }
-                if !db::claim(&conn, ticket.id, agent.id, 3600)? {
+                // The lease must outlive the job. A fixed 1 h lease against a
+                // 2 h worker budget guarantees the ticket is handed back and
+                // re-claimed while its process is still working — four restarts
+                // of the same run in one evening. Size it from the budget, with
+                // a small grace so the claim survives a slow finish.
+                let lease = adapters::worker_budget().as_secs() as i64 + 300;
+                if !db::claim(&conn, ticket.id, agent.id, lease)? {
                     db::set_agent_status(&conn, agent.id, "idle")?;
                     return Ok(());
                 }
@@ -1006,6 +1031,39 @@ mod tests {
             db::children_of(&conn, ticket.id).unwrap()
         };
         assert_eq!(kids.len(), 2);
+    }
+
+    /// A long worker job must not stop triage from being collected.
+    ///
+    /// The original drain loop awaited `join_next()` with nothing else, so one
+    /// two-hour worker meant no manager job was collected for two hours: an
+    /// untriaged ticket sat in `triaged` and the board looked frozen while one
+    /// agent thought. This pins the collect interval as a real ceiling.
+    #[tokio::test]
+    async fn a_slow_job_does_not_starve_triage() {
+        use std::time::{Duration, Instant};
+        let db = db::open(":memory:").unwrap();
+        {
+            let conn = db.lock().unwrap();
+            let d = db::create_division(&conn, "d", "D", "", "/tmp").unwrap();
+            // `shell` sleeps far longer than the interval, standing in for a
+            // slow model without needing one.
+            db::create_agent(&conn, "mgr", "Mgr", "manager", Some(d), "shell", "", "").unwrap();
+            db::create_agent(&conn, "w1", "W1", "worker", Some(d), "shell", "", "").unwrap();
+            db::create_ticket(&conn, d, None, "Queued", "b", 1, Some(2), "human", "queued").unwrap();
+            db::create_ticket(&conn, d, None, "Needs triage", "b", 2, None, "human", "triaged").unwrap();
+        }
+        let started = Instant::now();
+        // Only the collection tick matters here; the jobs themselves are
+        // cancelled when this future is dropped.
+        let tick = tokio::spawn(async move { tick(db.clone(), 1, 3).await });
+        tokio::time::sleep(COLLECT_INTERVAL * 3).await;
+        tick.abort();
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the drain loop must keep collecting while a job runs"
+        );
+        assert!(COLLECT_INTERVAL <= Duration::from_secs(10), "collect tick must be prompt");
     }
 
     #[test]

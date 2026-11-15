@@ -41,6 +41,12 @@ fn trim_output(s: &str) -> String {
 /// Job budgets. Workers do real builds and captures, and a 30 min cap kept
 /// killing productive runs mid-file; two hours is the new default. Overridable
 /// because a slow model on a slow day should not need a rebuild.
+/// How long a worker job may run. Public so the dispatcher can size the claim
+/// lease from the same number instead of hard-coding a shorter one.
+pub fn worker_budget() -> Duration {
+    timeout_for(JobKind::Worker)
+}
+
 fn timeout_for(kind: JobKind) -> Duration {
     let (var, default) = match kind {
         JobKind::Manager => ("BUREAU_MANAGER_TIMEOUT_S", 420u64),
