@@ -267,6 +267,38 @@
   .f-enabled-row{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--mut);margin:6px 0}
   .adr-actions{display:flex;gap:7px;align-items:center;margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
   .adr-actions .ag-save{margin-left:auto}
+  /* Destructive action reads as a quiet text link until you actually reach for
+     it: a solid red button beside Save is one misclick away from deleting an
+     agent and its ladder. */
+  .btn-del-text{background:none;border:none;color:#5c6478;font-family:inherit;
+    font-size:10.5px;padding:2px 0;cursor:pointer;text-decoration:underline;
+    text-decoration-color:#39404f;text-underline-offset:2px}
+  .btn-del-text:hover{color:#ffb4b4;text-decoration-color:#7a3b47}
+  /* The agent being deleted fades back so the confirm panel reads as the
+     active thing on screen. */
+  .adr.deleting{opacity:.45}
+  .del-confirm{background:#1a1114;border:1px solid #4a2730;border-radius:10px;
+    padding:11px 12px;margin:6px 0 8px}
+  .dc-head{font-size:12.5px;color:#ffb4b4;margin-bottom:6px}
+  .dc-head b{font-family:ui-monospace,monospace}
+  .dc-body{font-size:11px;color:var(--mut);line-height:1.5}
+  .dc-warn{color:#fcd34d;margin-top:6px}
+  .dc-row{display:flex;flex-direction:column;gap:4px;margin-top:9px;font-size:10.5px;color:var(--dim)}
+  .dc-row select,.dc-typed{background:#141824;border:1px solid var(--line);border-radius:7px;
+    padding:4px 7px;font-size:11.5px;color:var(--txt);outline:none;font-family:inherit}
+  .dc-typed{font-family:ui-monospace,monospace}
+  .dc-typed:focus{border-color:#7a3b47}
+  .dc-row code{font-family:ui-monospace,monospace;color:#c7d4ff;font-size:10px}
+  .dc-actions{display:flex;gap:7px;justify-content:flex-end;margin-top:11px}
+  /* Disarmed: visibly inert. Armed: unmistakably a red button. The gap between
+     the two states is the whole point of the gate. */
+  .dc-actions .btn[disabled]{opacity:.35;cursor:not-allowed;filter:grayscale(1)}
+  /* `.btn.danger` is more specific than a bare class, so the armed rule has to
+     match it head-on or the armed state silently stays grey. */
+  .dc-actions .btn.danger.btn-danger-armed{background:#7f1d24;border-color:#a8303a;
+    color:#ffe4e6;font-weight:600;opacity:1;filter:none}
+  .dc-actions .btn.danger.btn-danger-armed:hover{background:#96252d;border-color:#c43a45}
+  .dc-row code{background:#2a1619;border-color:#4a2730;color:#ffc9cc}
   /* typed lists */
   .chips{display:flex;flex-wrap:wrap;gap:5px;align-items:center;background:#141824;
     border:1px solid var(--line);border-radius:8px;padding:5px 7px;min-height:32px}
@@ -1245,7 +1277,7 @@ function agentsModal(openSlug = "") {
         </div>
 
         <div class="adr-actions">
-          <button class="btn ghost danger ag-del" data-slug="${esc(a.slug)}">Delete agent</button>
+          <button class="btn-del-text ag-del" data-slug="${esc(a.slug)}">Delete agent…</button>
           <button class="btn ag-save" data-slug="${esc(a.slug)}">Save ${esc(a.slug)}</button>
         </div>
       </div>
@@ -1398,15 +1430,17 @@ function agentsModal(openSlug = "") {
     } catch (e) { toast(e.message, true); }
   };
 
-  // Deleting runs immediately: the server moves the agent's open tickets to
-  // ?reassign=<slug> or back to triage. Same behaviour as before, just moved
-  // into the per-agent drawer.
-  const deleteAgent = async (slug) => {
-    if (!window.confirm(`Delete agent ${slug}?`)) return;
+  // Deleting is irreversible and takes the agent's ladder with it, so it asks
+  // for the slug to be typed. `window.confirm` was one Enter away from a
+  // muscle-memory "yes", and it never said what would happen to open tickets.
+  const deleteAgent = (slug) => {
     const snap = S.snap;
     const agent = snap.agents.find(a => a.slug === slug) || { id: -1, division_id: null };
     const movable = ["triaged", "queued", "in_progress", "review"];
     const openTickets = snap.tickets.filter(t => t.assignee_slug === slug && movable.includes(t.status));
+    const running = agent.status === "running";
+    const mates = snap.agents.filter(a => a.id !== agent.id && a.division_id === agent.division_id && a.role === "worker");
+
     const run = async (reassign) => {
       try {
         const q = reassign ? "?reassign=" + encodeURIComponent(reassign) : "";
@@ -1415,20 +1449,57 @@ function agentsModal(openSlug = "") {
         closeModal(); load();
       } catch (e) { toast(e.message, true); }
     };
-    if (!openTickets.length) return run("");
-    const mates = snap.agents.filter(a => a.id !== agent.id && a.division_id === agent.division_id && a.role === "worker");
+
     const row = $(`#modal .adr[data-slug="${CSS.escape(slug)}"]`);
-    const strip = document.createElement("div");
-    strip.className = "ag-confirm";
-    strip.innerHTML = `<span>${openTickets.length} open ticket${openTickets.length === 1 ? "" : "s"}:</span>
-      <select><option value="">— send back to triage —</option>${mates.map(x => `<option value="${esc(x.slug)}">${esc(x.slug)}</option>`).join("")}</select>
-      <button class="btn small ghost" data-x="cancel">Cancel</button>
-      <button class="btn small danger" data-x="ok">Delete</button>`;
-    if (row) row.after(strip); else $("#modal").prepend(strip);
-    strip.querySelector('[data-x="cancel"]').onclick = () => strip.remove();
-    strip.querySelector('[data-x="ok"]').onclick = () => {
-      const reassign = strip.querySelector("select").value;
-      strip.remove(); run(reassign);
+    const panel = document.createElement("div");
+    panel.className = "del-confirm";
+    panel.innerHTML = `
+      <div class="dc-head">Delete <b>${esc(slug)}</b>?</div>
+      <div class="dc-body">
+        This removes the agent and its whole model ladder. It cannot be undone.
+        ${running ? `<div class="dc-warn">This agent is running right now — wait for it to finish first.</div>` : ""}
+        ${openTickets.length ? `
+          <div class="dc-warn">${openTickets.length} open ticket${openTickets.length === 1 ? "" : "s"} will be moved.</div>
+          <label class="dc-row">Hand them to
+            <select class="dc-reassign"><option value="">— send back to triage —</option>${mates.map(x => `<option value="${esc(x.slug)}">${esc(x.slug)}</option>`).join("")}</select>
+          </label>` : ""}
+        <div class="dc-row">
+          <label for="dc-typed-${esc(slug)}">Type <code>${esc(slug)}</code> to confirm</label>
+          <input id="dc-typed-${esc(slug)}" class="dc-typed" placeholder="${esc(slug)}"
+                 autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+      <div class="dc-actions">
+        <button class="btn small ghost" data-x="cancel">Cancel</button>
+        <button class="btn small danger" data-x="ok" disabled>Delete agent</button>
+      </div>`;
+
+    if (row) row.after(panel); else $("#modal").prepend(panel);
+    if (row) row.classList.add("deleting");
+
+    const typed = panel.querySelector(".dc-typed");
+    const ok = panel.querySelector('[data-x="ok"]');
+    // The button only arms on an exact match, and never while the agent runs.
+    const arm = () => {
+      const go = typed.value.trim() === slug && !running;
+      ok.disabled = !go;
+      ok.classList.toggle("btn-danger-armed", go);
+    };
+    typed.addEventListener("input", arm);
+    arm();
+    typed.focus();
+
+    const close = () => {
+      panel.remove();
+      const r = $(`#modal .adr[data-slug="${CSS.escape(slug)}"]`);
+      if (r) r.classList.remove("deleting");
+    };
+    panel.querySelector('[data-x="cancel"]').onclick = close;
+    typed.onkeydown = (e) => { if (e.key === "Escape") close(); };
+    ok.onclick = () => {
+      const sel = panel.querySelector(".dc-reassign");
+      close();
+      run(sel ? sel.value : "");
     };
   };
 
