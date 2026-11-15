@@ -73,7 +73,27 @@ async fn dispatch(agent: &Agent, prompt: &str, ctx: &JobCtx) -> Result<String> {
         "echo" => Ok(prompt.to_string()),
         "ollama" => ollama(agent, prompt, ctx).await,
         "hermes" => {
-            let mut args = vec!["-z".to_string(), prompt.to_string()];
+            // Continue one stable, named session per agent instead of a bare
+            // one-shot, which creates a fresh untitled session for every job
+            // and floods the app's session list with unknowns. `chat -q` with
+            // --oneshot keeps the scripted stdout contract; -c <name> plus
+            // --create-if-missing makes the first job create the session and
+            // later jobs resume it.
+            //
+            // Safe only because Bureau runs at most one job per agent (see
+            // db::try_start_agent, which flips idle -> running atomically). A
+            // resumed session is not concurrency-safe: do not run two jobs for
+            // one agent, and do not rename a session under a live job.
+            let mut args = vec![
+                "chat".to_string(),
+                "-q".to_string(),
+                prompt.to_string(),
+                "--oneshot".to_string(),
+                "-Q".to_string(),
+                "-c".to_string(),
+                agent_session_name(agent),
+                "--create-if-missing".to_string(),
+            ];
             if !ctx.project_path.is_empty() {
                 args.push("--in".to_string());
                 args.push(ctx.project_path.clone());
@@ -85,9 +105,21 @@ async fn dispatch(agent: &Agent, prompt: &str, ctx: &JobCtx) -> Result<String> {
             if agent.system_hint.contains("yolo") {
                 args.push("--yolo".to_string());
             }
+            // Skills and plugins are typed per agent, but only the hermes CLI
+            // has a way to accept them. Other adapters get a warning rather
+            // than a silent lie about what was applied.
+            for skill in parse_list(&agent.skills) {
+                args.push("--skill".to_string());
+                args.push(skill);
+            }
+            for plugin in parse_list(&agent.plugins) {
+                args.push("--plugin".to_string());
+                args.push(plugin);
+            }
             run_cmd("hermes", &args, None, prompt, ctx, agent).await
         }
         "opencode" => {
+            warn_unapplied(agent);
             let mut args = vec!["run".to_string(), prompt.to_string(), "--auto".to_string()];
             if !agent.model.is_empty() {
                 args.push("--model".to_string());
@@ -120,6 +152,45 @@ async fn dispatch(agent: &Agent, prompt: &str, ctx: &JobCtx) -> Result<String> {
         }
         other => bail!("unknown adapter '{other}' (demo|echo|ollama|hermes|opencode|shell)"),
     }
+}
+
+/// Read a JSON array of strings, tolerating anything malformed. An agent with
+/// a corrupt list must still run — losing a skill is annoying, refusing to
+/// start is worse.
+fn parse_list(raw: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.trim().is_empty())
+        .collect()
+}
+
+/// Say loudly when an agent carries settings its CLI cannot honour, so nobody
+/// debugs a "missing skill" that was never passed to anything.
+fn warn_unapplied(agent: &Agent) {
+    let skills = parse_list(&agent.skills);
+    let plugins = parse_list(&agent.plugins);
+    if !skills.is_empty() || !plugins.is_empty() {
+        eprintln!(
+            "bureau: agent '{}' has {} skill(s) and {} plugin(s), but the '{}' adapter \
+             cannot pass them to its CLI; they are stored and ignored",
+            agent.slug,
+            skills.len(),
+            plugins.len(),
+            agent.adapter
+        );
+    }
+}
+
+/// The stable Hermes session name for an agent: `bureau:<division>:<agent>`.
+///
+/// One session per agent keeps the agent's history in one place and keeps
+/// concurrent jobs apart — a worker and its division's manager never share a
+/// conversation. A division cannot be the unit because a division runs several
+/// agents in parallel.
+fn agent_session_name(agent: &Agent) -> String {
+    let division = agent.division_slug.as_deref().unwrap_or("none");
+    format!("bureau:{division}:{}", agent.slug)
 }
 
 fn shell_quote(s: &str) -> String {
@@ -429,10 +500,41 @@ mod tests {
             adapter: adapter.into(),
             model: String::new(),
             system_hint: String::new(),
+            skills: "[]".into(),
+            plugins: "[]".into(),
             enabled: true,
             status: "idle".into(),
             created_at: String::new(),
         }
+    }
+
+    #[test]
+    fn skill_and_plugin_lists_survive_a_bad_value() {
+        assert_eq!(parse_list(r#"["a","b"]"#), vec!["a", "b"]);
+        assert_eq!(parse_list("[]"), Vec::<String>::new());
+        // A corrupt list must not stop the agent from running...
+        assert_eq!(parse_list("not json"), Vec::<String>::new());
+        assert_eq!(parse_list(""), Vec::<String>::new());
+        // ...and blank entries are dropped rather than passed as empty flags.
+        assert_eq!(parse_list(r#"["a","  ",""]"#), vec!["a"]);
+        // A nested structure is not a flat list; refuse rather than guess.
+        assert_eq!(parse_list(r#"[{"name":"x"}]"#), Vec::<String>::new());
+    }
+
+    #[test]
+    fn agent_session_name_is_stable_per_agent() {
+        let a = agent("hermes");
+        assert_eq!(agent_session_name(&a), "bureau:hexa:ada");
+        // Two jobs for the same agent must land in the same session...
+        assert_eq!(agent_session_name(&a), agent_session_name(&agent("hermes")));
+        // ...but a worker must never share the manager's session.
+        let mut w = agent("hermes");
+        w.slug = "bob".into();
+        assert_ne!(agent_session_name(&a), agent_session_name(&w));
+        // An agent with no division still gets a nameable session.
+        let mut orphan = agent("hermes");
+        orphan.division_slug = None;
+        assert_eq!(agent_session_name(&orphan), "bureau:none:ada");
     }
 
     #[test]

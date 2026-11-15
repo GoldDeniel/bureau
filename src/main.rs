@@ -554,6 +554,8 @@ async fn main() -> Result<()> {
                         },
                         role: None,
                         division: None,
+                        skills: None,
+                        plugins: None,
                     };
                     db::agent_by_slug(&conn, &slug)?
                         .with_context(|| format!("agent '{slug}' not found"))?;
@@ -574,7 +576,19 @@ async fn main() -> Result<()> {
             match cmd {
                 DivisionCmd::List => {
                     // describe() takes the lock itself: do not hold it here or this deadlocks.
-                    print!("{}", seed::describe(&db)?);
+                    let listing = seed::describe(&db)?;
+                    if listing.is_empty() {
+                        // Silence reads as "the command is broken"; say which database
+                        // was empty and how to reach the one the server is serving.
+                        eprintln!(
+                            "no divisions in {} — it is not seeded, or it is not the database \
+                             the server is using; run `bureau seed` here, or pass --db / set \
+                             BUREAU_DB to the server's database",
+                            cli.db
+                        );
+                        std::process::exit(1);
+                    }
+                    print!("{listing}");
                 }
                 DivisionCmd::Pause { slug } => {
                     let conn = db.lock().unwrap();

@@ -88,7 +88,10 @@
   .agents-mini{display:flex;flex-direction:column;gap:5px}
   .agent-row{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--mut);padding:2px 4px}
   .agent-row .slug{color:var(--txt);font-family:ui-monospace,monospace;font-size:11px}
-  .agent-row .ad{margin-left:auto;font-size:10px;color:var(--dim);border:1px solid var(--line);padding:0 5px;border-radius:5px}
+  .agent-row .ad{margin-left:auto;font-size:9.5px;color:var(--dim);border:1px solid var(--line);padding:0 5px;border-radius:5px}
+  .agent-row .ad.role{font-family:ui-monospace,monospace;letter-spacing:.02em}
+  .agent-row .ad.role.mgr{color:#b9c6f5;border-color:#2b3550;background:#161b2a}
+  .agent-row:hover{background:#12151d;border-radius:6px}
   .st{width:6px;height:6px;border-radius:50%;background:#3a4152;flex:none}
   .st.running{background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse 1.2s infinite}
   .st.idle{background:#4b556b}
@@ -160,6 +163,22 @@
   .pill.who{color:#b9c6f5;border-color:#2b3550;background:#161b2a;font-family:ui-monospace,monospace;font-size:9.5px}
   .pill.sub{color:#d8b4fe;border-color:#3b2a52;background:#1a1526}
   .pill.ok{color:#86efac;border-color:#234132;background:#101d16}
+  /* failure kinds — one hue per family so the eye groups them on a board */
+  .pill.fk{cursor:pointer;font-family:ui-monospace,monospace;font-size:9.5px;letter-spacing:.02em}
+  .pill.fk-rate_limit,.pill.fk-quota{color:#fcd34d;border-color:#453a1d;background:#1d1a10}
+  .pill.fk-auth{color:#f0a4f0;border-color:#472a52;background:#1c1220}
+  .pill.fk-provider_down{color:#fdba74;border-color:#4a3320;background:#1f170f}
+  .pill.fk-content_safety{color:#c4b5fd;border-color:#37306b;background:#16132a}
+  .pill.fk-timeout{color:#93c5fd;border-color:#243a5c;background:#101a2b}
+  .pill.fk-tooling{color:#a5b4c9;border-color:#2e3543;background:#141821}
+  .pill.fk-model_output{color:#fca5a5;border-color:#4a2727;background:#1f1313}
+  .pill.fk-unknown{color:#9aa3b5;border-color:#2b3140;background:#14171f}
+  .pill.fk:hover{filter:brightness(1.35)}
+  .pill.fk.active{outline:1px solid currentColor;outline-offset:1px}
+  /* the one-line reason, shown under a failed card */
+  .why{margin-top:4px;font-size:10.5px;color:#8b93a7;line-height:1.4;
+       overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .why::before{content:"↳ ";color:#4d566b}
   .card .subs{margin-top:7px;padding-top:6px;border-top:1px dashed #242a3a;display:flex;flex-direction:column;gap:2px}
   .card .subs div{font-size:10.5px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .card .subs b{font-family:ui-monospace,monospace;font-weight:400;color:#6b7694}
@@ -199,6 +218,91 @@
   .sec .hint{text-transform:none;letter-spacing:0;color:#4d566b;font-size:10.5px}
   .term{margin:0;background:#0a0c11;border:1px solid var(--line);border-radius:10px;padding:10px 11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13.6px;line-height:1.62;color:#c3ccdd;white-space:pre-wrap;word-break:break-word;max-height:min(46vh,460px);overflow:auto}
   .result{border-left:2px solid var(--acc);background:#131a2a;padding:11px 13px;border-radius:0 8px 8px 0;font-size:14.5px;line-height:1.6;white-space:pre-wrap;color:#dbe3ff;max-height:none;overflow:visible}
+  /* ---------- collapsible blocks (inline, never a new window) ---------- */
+  .fold{position:relative}
+  .fold .fold-body{position:relative;overflow:hidden}
+  /* --lines is set inline per block (5 for description, 10 for timeline, …) */
+  .fold.clamped .fold-body{max-height:calc(var(--lines, 5) * 1.62em)}
+  /* fade so a clamped block reads as "there is more", not as amputated text */
+  .fold.clamped .fold-body::after{
+    content:"";position:absolute;left:0;right:0;bottom:0;height:2.4em;pointer-events:none;
+    background:linear-gradient(to bottom,transparent,var(--fold-fade,#12151d));
+  }
+  .fold[data-fade="result"] .fold-body::after{--fold-fade:#131a2a}
+  .fold[data-fade="term"] .fold-body::after{--fold-fade:#0a0c11}
+  .fold-more{
+    display:inline-flex;align-items:center;gap:5px;margin-top:6px;
+    background:#141824;border:1px solid var(--line);border-radius:6px;
+    color:var(--acc);font-size:10.5px;padding:2px 9px;cursor:pointer;font-family:inherit;
+  }
+  .fold-more:hover{border-color:#3a4a72;background:#182034}
+  .fold-more .chev{transition:transform .15s;display:inline-block}
+  .fold.open .fold-more .chev{transform:rotate(180deg)}
+  .fold.open .fold-body{max-height:none}
+  .fold.open .fold-body::after{display:none}
+  .sec-row{display:flex;align-items:center;gap:8px}
+  .sec-row .sec{flex:1}
+  .sec-row .fold-all{font-size:10px;color:var(--dim);background:none;border:none;cursor:pointer;font-family:inherit;padding:0}
+  .sec-row .fold-all:hover{color:var(--acc)}
+  /* ---------- agent drawers (nested settings) ---------- */
+  .modal.wide{width:780px}
+  .adr-list{display:flex;flex-direction:column;gap:2px}
+  .adrs{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+  .adr{background:#12151d;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .adr.open{border-color:#2d3a55;background:#131720}
+  .adr-head{display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;
+    color:var(--txt);font-family:inherit;font-size:12px;padding:8px 10px;cursor:pointer;text-align:left}
+  .adr-head:hover{background:#161b26}
+  .adr-slug{font-family:ui-monospace,monospace;font-size:11.5px;color:#cfd8ec}
+  .adr-name{color:var(--mut);font-size:11px}
+  .adr-role{font-family:ui-monospace,monospace;font-size:9.5px}
+  .adr-role.mgr{color:#b9c6f5;border-color:#2b3550;background:#161b2a}
+  .adr-count{margin-left:auto;font-size:10px;color:#4d566b}
+  .adr-head .chev{color:var(--dim);font-size:10px;transition:transform .15s}
+  .adr.open .adr-head .chev{transform:rotate(180deg)}
+  .adr-body{display:none;padding:2px 12px 12px;border-top:1px solid var(--line);margin-top:2px}
+  .adr.open .adr-body{display:block}
+  .adr-body .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+  .adr-body .field{margin-bottom:8px}
+  .f-enabled-row{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--mut);margin:6px 0}
+  .adr-actions{display:flex;gap:7px;align-items:center;margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
+  .adr-actions .ag-save{margin-left:auto}
+  /* typed lists */
+  .chips{display:flex;flex-wrap:wrap;gap:5px;align-items:center;background:#141824;
+    border:1px solid var(--line);border-radius:8px;padding:5px 7px;min-height:32px}
+  .chip{display:inline-flex;align-items:center;gap:4px;background:#1b2130;border:1px solid #2a3246;
+    border-radius:6px;padding:1px 4px 1px 7px;font-size:10.5px;color:#c7d4ff;font-family:ui-monospace,monospace}
+  .chip-x{background:none;border:none;color:#6b7694;cursor:pointer;font-size:12px;line-height:1;padding:0 1px}
+  .chip-x:hover{color:#fca5a5}
+  .chip-add{flex:1;min-width:120px;background:none;border:none;outline:none;color:var(--txt);
+    font-family:inherit;font-size:11.5px;padding:2px}
+  /* the nested model ladder */
+  .ladder{display:flex;flex-direction:column;gap:7px}
+  .mgroup{background:#0f131b;border:1px solid var(--line);border-radius:9px;padding:7px 8px}
+  .mgroup-head{display:flex;align-items:center;gap:7px;margin-bottom:5px}
+  .mgroup-head .prov{font-family:ui-monospace,monospace;font-size:10.5px;color:#9fb0d8;letter-spacing:.03em}
+  .mgroup-head .n{font-size:9.5px;color:#4d566b;border:1px solid var(--line);border-radius:5px;padding:0 5px}
+  .mrow{display:grid;grid-template-columns:130px 1fr 110px auto auto;gap:6px;align-items:center;margin-top:5px}
+  .mrow select,.mrow input{background:#141824;border:1px solid var(--line);border-radius:6px;
+    padding:3px 6px;font-size:11px;color:var(--txt);outline:none;font-family:inherit;width:100%}
+  .mrow input{font-family:ui-monospace,monospace}
+  .pill.cooling{color:#93c5fd;border-color:#243a5c;background:#101a2b;font-size:9px}
+  /* failure-kind filter: the board's "why", as a row of counts */
+  .failbar{display:none;flex-wrap:wrap;gap:6px;padding:0 18px 8px;align-items:center}
+  .failbar.show{display:flex}
+  .failbar .fb-lbl{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);margin-right:2px}
+  .failbar .pill{cursor:pointer}
+  .failbar .clear{background:none;border:none;color:var(--dim);font-size:10.5px;cursor:pointer;font-family:inherit;padding:0 4px}
+  .failbar .clear:hover{color:var(--danger)}
+  .attempts{display:flex;flex-direction:column;gap:7px}
+  .attempt{background:#12151d;border:1px solid var(--line);border-radius:9px;padding:8px 10px}
+  .attempt .am{font-family:ui-monospace,monospace;font-size:10px;color:#8b95ad;margin-left:6px}
+  .attempt .at{margin-left:auto;font-size:10px;color:#4d566b}
+  .attempt{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px}
+  .attempt .ad2{flex:1 0 100%;font-size:12px;line-height:1.5;color:#c2cadb;font-family:ui-monospace,monospace;word-break:break-word}
+  .attempt .fold{flex:1 0 100%;margin-top:4px}
+  .attempt .term2{margin:0;background:#0a0c11;border:1px solid var(--line);border-radius:7px;padding:7px 9px;
+    font-family:ui-monospace,monospace;font-size:11px;line-height:1.55;color:#aab4c8;white-space:pre-wrap;word-break:break-word}
   .kids{display:flex;flex-direction:column;gap:5px}
   .kid{display:flex;align-items:center;gap:8px;background:#12151d;border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:11.5px;cursor:pointer}
   .kid:hover{border-color:#31405f}
@@ -300,17 +404,7 @@
   /* ---------- readable + focus view ---------- */
   .sec-row{display:flex;align-items:center;gap:8px;margin:2px 0 -6px}
   .sec-row .sec{margin:0}
-  .expand{margin-left:auto;background:#151a26;border:1px solid var(--line);color:var(--mut);border-radius:7px;padding:1px 8px;font-size:12px;line-height:1.6;cursor:pointer;font-family:inherit}
-  .expand:hover{color:var(--txt);border-color:#33405f}
-  .focus-wrap{position:fixed;inset:0;z-index:80;display:none;background:rgba(5,6,10,.86);padding:clamp(8px,2.4vw,30px)}
-  .focus-wrap.show{display:flex}
-  .focus-card{display:flex;flex-direction:column;gap:10px;width:100%;max-width:1200px;height:100%;margin:auto;background:#0d1017;border:1px solid var(--line);border-radius:16px;padding:14px 16px;box-shadow:0 30px 90px rgba(0,0,0,.65)}
-  .focus-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  .focus-head .ft{font-size:13px;color:var(--mut);letter-spacing:.06em;text-transform:uppercase}
-  .focus-head .fr{font-family:ui-monospace,monospace;font-size:12px;color:var(--acc)}
-  .focus-body{flex:1;overflow:auto;background:#080a0f;border:1px solid var(--line);border-radius:10px;padding:14px 16px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:15px;line-height:1.66;color:#c7d2e6;white-space:pre-wrap;word-break:break-word}
-  .focus-body.prose{font-family:inherit;font-size:17px;line-height:1.7;color:#d7dcea}
-</style>
+  </style>
 </head>
 <body>
 <div class="app">
@@ -345,6 +439,7 @@
       </div>
     </div>
     <div class="livebar" id="livebar"></div>
+    <div class="failbar" id="failbar"></div>
     <div class="board" id="board"></div>
   </main>
 </div>
@@ -362,15 +457,6 @@
   <div class="dr-body" id="dr-body"></div>
 </aside>
 
-<div class="focus-wrap" id="focus-wrap"><div class="focus-card">
-  <div class="focus-head"><span class="ft" id="focus-title">Agent output</span><span class="fr" id="focus-ref"></span>
-    <span style="margin-left:auto;display:flex;gap:7px">
-      <button class="btn small" id="focus-copy">copy</button>
-      <button class="btn small" id="focus-close">close</button>
-    </span>
-  </div>
-  <div class="focus-body" id="focus-body"></div>
-</div></div>
 <div class="modal-wrap" id="modal-wrap"><div class="modal" id="modal"></div></div>
 <div id="toasts"></div>
 
@@ -382,6 +468,53 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&
 const rich = (s) => esc(s)
   .replace(/`([^`\n]+)`/g, "<code>$1</code>")
   .replace(/\b(BUR-\d+)\b/g, '<a href="#" class="ref-link" data-ref="$1">$1</a>');
+/* ---------- collapsible blocks ----------
+   A fold clamps its body to N lines and reveals the rest in place. Daniel was
+   explicit: no second window, a button that expands the element itself. */
+const foldOpen = new Set();          // ids of currently expanded folds
+const foldKey = (ref, name, extra) => `${ref}:${name}${extra ? ":" + extra : ""}`;
+
+function fold(id, inner, { lines = 5, label = "Show all", fade = "" } = {}) {
+  const open = foldOpen.has(id);
+  return `<div class="fold ${open ? "open" : "clamped"}" data-fold="${esc(id)}"
+      data-lines="${lines}" data-label="${esc(label)}" style="--lines:${lines}"
+      ${fade ? ` data-fade="${esc(fade)}"` : ""}>
+    <div class="fold-body">${inner}</div>
+    <button class="fold-more" data-fold-toggle="${esc(id)}">
+      <span class="lbl">${open ? "Show less" : esc(label)}</span><span class="chev">▾</span>
+    </button>
+  </div>`;
+}
+
+/// Wire every fold button inside `root`. Called after each drawer render.
+function wireFolds(root) {
+  root.querySelectorAll("[data-fold-toggle]").forEach(btn => {
+    btn.onclick = () => {
+      const id = btn.dataset.foldToggle;
+      const box = root.querySelector(`.fold[data-fold="${CSS.escape(id)}"]`);
+      if (!box) return;
+      const nowOpen = !box.classList.contains("open");
+      box.classList.toggle("open", nowOpen);
+      box.classList.toggle("clamped", !nowOpen);
+      btn.querySelector(".lbl").textContent = nowOpen ? "Show less" : box.dataset.label;
+      if (nowOpen) foldOpen.add(id); else foldOpen.delete(id);
+    };
+  });
+  // A block that fits inside its clamp does not need a toggle at all. Measure
+  // the body's own scrollHeight, not the fold's: the fold is already clamped,
+  // so its height always equals the clamp and would hide every real overflow.
+  root.querySelectorAll(".fold.clamped").forEach(box => {
+    const body = box.querySelector(".fold-body");
+    const btn = box.querySelector(".fold-more");
+    if (!body || !btn) return;
+    const lines = +box.dataset.lines || 5;
+    const lh = parseFloat(getComputedStyle(body).lineHeight) || 20;
+    if (body.scrollHeight <= lh * lines + 8) btn.remove();
+  });
+}
+
+const failureLabel = (k) => String(k || "unknown").replace(/_/g, " ");
+
 const ago = (iso) => {
   if (!iso) return "";
   const t = Date.parse(iso); if (isNaN(t)) return iso;
@@ -400,16 +533,17 @@ const COLS = [
   {id:"attention", label:"Blocked", st:["blocked","failed"]},
 ];
 
-const S = { snap:null, snapJson:null, division:"all", q:"", openRef:null, openData:null, openJson:null, drRef:null, logPin:null, busy:false, timer:null, showDone:false };
+const S = { snap:null, snapJson:null, division:"all", q:"", openRef:null, openData:null, openJson:null, drRef:null, logPin:null, busy:false, timer:null, showDone:false, fail:"" };
 
 // view state survives a reload: ticket in the hash, filters in localStorage
 const VIEW_KEY = "bureau_view", BOARD_KEY = "bureau_board";
 const view = (() => { try { return JSON.parse(localStorage.getItem(VIEW_KEY) || "{}"); } catch { return {}; } })();
 if (typeof view.division === "string") S.division = view.division;
+if (typeof view.fail === "string") S.fail = view.fail;
 if (typeof view.q === "string") S.q = view.q;
 if (S.q) $("#search").value = S.q;
 S.showDone = !!view.showDone;
-const saveView = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify({division:S.division, q:S.q, showDone:S.showDone})); } catch {} };
+const saveView = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify({division:S.division, q:S.q, showDone:S.showDone, fail:S.fail})); } catch {} };
 
 const boardScroll = (() => { try { const v = JSON.parse(localStorage.getItem(BOARD_KEY) || "{}"); return { left: +v.left || 0, cols: v.cols || {} }; } catch { return { left: 0, cols: {} }; } })();
 let boardSave = null;
@@ -487,7 +621,7 @@ async function load() {
     S.snap = snap; S.snapJson = key;
     if (changed) {
       const sx = scrollX, sy = scrollY;
-      renderRail(); renderBoard(); renderFoot();
+      renderRail(); renderFailbar(); renderBoard(); renderFoot();
       scrollTo(sx, sy);
     } else {
       renderLive(snap.live || []);   // chips and timers stay live without a full repaint
@@ -536,18 +670,26 @@ function renderRail() {
     ? `${cur.manager ? "manager " + cur.manager.slug : "no manager"} · ${cur.project_path || "no path"}`
     : `${s.divisions.length} divisions · ${s.agents.length} agents · ${s.tickets.length} tickets`;
 
+  // The rail answers one question: who is on this team and is it the manager
+  // or a worker. Model names were noise here — they live in the agent drawer.
   const agents = cur ? s.agents.filter(a => a.division_id === cur.id) : s.agents;
   const shown = agents.slice(0, 8);
   $("#agents-mini").innerHTML = shown.map(a => `
-    <div class="agent-row" title="${esc(a.role)} · ${esc(a.adapter)}">
+    <div class="agent-row" title="${esc(a.slug)} — click to configure">
       <span class="st ${a.status}"></span>
       <span class="slug">${esc(a.slug)}</span>
-      <span>${esc(a.role === "manager" ? "manager" : "")}</span>
-      <span class="ad">${esc(a.adapter)}${a.model ? " · " + esc(a.model.split(":")[0]) : ""}${a.enabled ? "" : " · off"}</span>
+      <span class="ad role${a.role === "manager" ? " mgr" : ""}">${esc(a.role)}${a.enabled ? "" : " · off"}</span>
     </div>`).join("") + (agents.length > shown.length
       ? `<div class="agent-row" style="color:#5d6579">+${agents.length - shown.length} more · <button class="btn ghost small" id="btn-more-agents" style="padding:0 4px">manage</button></div>`
       : "") || `<div class="empty">no agents</div>`;
-  const more = $("#btn-more-agents"); if (more) more.onclick = agentsModal;
+  // Clicking an agent in the rail opens that agent's drawer directly.
+  $("#agents-mini").querySelectorAll(".agent-row[title]").forEach((row, i) => {
+    const a = shown[i];
+    if (!a) return;
+    row.style.cursor = "pointer";
+    row.onclick = () => agentsModal(a.slug);
+  });
+  const more = $("#btn-more-agents"); if (more) more.onclick = () => agentsModal();
   renderLive(s.live || []);
 }
 
@@ -556,11 +698,24 @@ function visibleTickets() {
   let ts = s.tickets;
   if (S.division !== "all") ts = ts.filter(t => t.division_slug === S.division);
   if (S.q) ts = ts.filter(t => (t.ref + " " + t.title + " " + t.body).toLowerCase().includes(S.q));
+  if (S.fail) {
+    const atts = s.attempts || {};
+    ts = ts.filter(t => atts[t.id] && atts[t.id].kind === S.fail);
+  }
   return ts;
 }
 
 function card(t) {
   const p = t.priority;
+  // The classified reason for a failed/blocked ticket: a tag you can click to
+  // filter the whole board by that failure kind, plus its one-line detail.
+  const att = S.snap.attempts ? S.snap.attempts[t.id] : null;
+  const failTag = att && ["blocked", "failed"].includes(t.status)
+    ? `<span class="pill fk fk-${esc(att.kind)} ${S.fail === att.kind ? "active" : ""}" data-kind="${esc(att.kind)}" title="${esc(att.detail)}">${esc(failureLabel(att.kind))}</span>`
+    : "";
+  const why = att && ["blocked", "failed"].includes(t.status)
+    ? `<div class="why" title="${esc(att.detail)}">${esc(att.detail)}</div>`
+    : "";
   const subs = t.children.length
     ? `<div class="subs">${t.children.slice(0,3).map(c =>
         `<div><b>${esc(c.ref)}</b> ${esc(c.title)}</div>`).join("")}
@@ -574,7 +729,9 @@ function card(t) {
       ${t.children.length ? `<span class="pill sub">${t.children.length} sub</span>` : ""}
       ${t.comment_count ? `<span class="pill">${t.comment_count} 💬</span>` : ""}
       ${t.attempts ? `<span class="pill">try ${t.attempts}</span>` : ""}
+      ${failTag}
     </div>
+    ${why}
     ${subs}
   </div>`;
 }
@@ -619,6 +776,26 @@ function renderBoard() {
     if (cards) cards.scrollTop = boardScroll.cols[c.dataset.col] || 0;
   });
   board.scrollLeft = boardScroll.left;
+}
+
+/// The failure filter strip. Hidden when there are no classified failures, so
+/// a healthy board gains no chrome.
+function renderFailbar() {
+  const s = S.snap; const el = $("#failbar"); if (!s || !el) return;
+  const totals = s.failure_totals || {};
+  const kinds = Object.keys(totals).filter(k => totals[k] > 0);
+  if (!kinds.length && !S.fail) { el.classList.remove("show"); el.innerHTML = ""; return; }
+  kinds.sort((a, b) => totals[b] - totals[a]);
+  el.classList.add("show");
+  el.innerHTML = `<span class="fb-lbl">Failures</span>` + kinds.map(k =>
+    `<span class="pill fk fk-${esc(k)} ${S.fail===k?"active":""}" data-kind="${esc(k)}"
+       title="Show only tickets whose last failure was ${esc(failureLabel(k))}">${esc(failureLabel(k))} · ${totals[k]}</span>`
+  ).join("") + (S.fail ? `<button class="clear" id="fb-clear">✕ clear filter</button>` : "");
+  el.querySelectorAll("[data-kind]").forEach(p => p.onclick = () => {
+    S.fail = S.fail === p.dataset.kind ? "" : p.dataset.kind;
+    saveView(); renderFailbar(); renderBoard();
+  });
+  const clr = $("#fb-clear"); if (clr) clr.onclick = () => { S.fail = ""; saveView(); renderFailbar(); renderBoard(); };
 }
 
 function renderFoot() {
@@ -725,6 +902,9 @@ function renderDrawer(keep) {
 
   const div = S.snap.divisions.find(x => x.id === t.division_id);
   const agents = S.snap.agents.filter(a => a.division_id === t.division_id);
+  const attempts = d.attempts || [];
+  const lastAttempt = attempts[0] || null;
+
   const kids = t.children.map(c => `
     <div class="kid" data-ref="${esc(c.ref)}">
       <span class="kr">${esc(c.ref)}</span>
@@ -732,9 +912,20 @@ function renderDrawer(keep) {
       <span class="kt">${esc(c.title)}</span>
       <span class="pill who">${esc(c.assignee || "-")}</span>
     </div>`).join("");
-  const comments = d.comments.map(c => `
+
+  // Every timeline entry is its own fold at 10 lines. The full agent output
+  // comments are the noisy ones, so they get a smaller clamp and a label that
+  // says what it is.
+  const comments = d.comments.map((c, i) => {
+    const isOutput = String(c.author).startsWith("bureau:output:");
+    return `
     <div class="cm"><div class="h"><span class="who">${esc(c.author)}</span><span>${ago(c.created_at)}</span></div>
-    <div class="b">${rich(c.body)}</div></div>`).join("");
+    ${fold(foldKey(t.ref, "cm", i), `<div class="b">${rich(c.body)}</div>`, {
+      lines: isOutput ? 6 : 10,
+      label: isOutput ? "Show full output" : "Show full entry",
+      fade: "result",
+    })}</div>`;
+  }).join("");
 
   const actions = [
     t.status !== "done" ? `<button class="btn small" data-act="done">✓ Approve / done</button>` : `<button class="btn small" data-act="review">↺ Reopen</button>`,
@@ -742,10 +933,24 @@ function renderDrawer(keep) {
     t.status !== "queued" ? `<button class="btn small" data-act="queued">→ Queue</button>` : "",
   ].join("");
 
+  // The attempts list is the "why": one row per failed run, newest first, each
+  // saying which model was tried and what it said. It belongs directly under
+  // the metadata because that is the question people open a failed ticket for.
+  const attemptRows = attempts.map(a => `
+    <div class="attempt">
+      <span class="pill fk fk-${esc(a.kind)}" data-kind="${esc(a.kind)}">${esc(failureLabel(a.kind))}</span>
+      <span class="am">${esc(a.provider || "local")}${a.model ? " · " + esc(a.model) : ""}</span>
+      <span class="at">${ago(a.created_at)}</span>
+      <div class="ad2">${esc(a.detail)}</div>
+      ${a.raw && a.raw.length > a.detail.length + 40
+        ? fold(foldKey(t.ref, "att", a.id), `<pre class="term2">${esc(a.raw)}</pre>`, { lines: 6, label: "Show raw output", fade: "term" })
+        : ""}
+    </div>`).join("");
+
   $("#dr-body").innerHTML = `
     <div class="meta-grid">
       <span class="k">Status</span>
-      <span><span class="pill ${t.status==="done"?"ok":""}">${esc(t.status)}</span></span>
+      <span><span class="pill ${t.status==="done"?"ok":""}">${esc(t.status)}</span>${lastAttempt && (t.status==="failed"||t.status==="blocked") ? ` <span class="pill fk fk-${esc(lastAttempt.kind)}" data-kind="${esc(lastAttempt.kind)}" title="${esc(lastAttempt.detail)}">${esc(failureLabel(lastAttempt.kind))}</span>` : ""}</span>
       <span class="k">Priority</span>
       <select id="dr-prio">${[0,1,2,3,4].map(p => `<option value="${p}" ${p===t.priority?"selected":""}>P${p}</option>`).join("")}</select>
       <span class="k">Division</span>
@@ -755,13 +960,14 @@ function renderDrawer(keep) {
         ${agents.map(a => `<option value="${esc(a.slug)}" ${a.slug===t.assignee_slug?"selected":""}>${esc(a.slug)} (${esc(a.role)})</option>`).join("")}
       </select>
     </div>
-    ${t.body ? `<div class="sec-row"><div class="sec">Description</div><button class="expand" data-focus="desc" title="Open full size">⤢</button></div><div class="body-txt" id="dr-desc">${rich(t.body)}</div>` : ""}
-    ${t.result ? `<div class="sec-row"><div class="sec">Result</div><button class="expand" data-focus="result" title="Open full size">⤢</button></div><div class="result" id="dr-result">${rich(t.result)}</div>` : ""}
-    <div class="sec-row"><div class="sec">Agent output <span class="hint">· live terminal</span></div><button class="expand" data-focus="log" title="Open full size">⤢</button></div>
-    <pre class="term" id="dr-log">${logText ? esc(logText) : "loading…"}</pre>
-    ${kids ? `<div class="sec">Sub-tickets (${t.children.length})</div><div class="kids">${kids}</div>` : ""}
-    <div class="sec">Timeline</div>
+    ${attemptRows ? `<div class="sec-row"><div class="sec">Why it failed <span class="hint">· ${attempts.length} attempt${attempts.length===1?"":"s"}</span></div></div><div class="attempts">${attemptRows}</div>` : ""}
+    ${t.result ? `<div class="sec-row"><div class="sec">Result</div></div>${fold(foldKey(t.ref, "result"), `<div class="result" id="dr-result">${rich(t.result)}</div>`, { lines: 8, label: "Show full result", fade: "result" })}` : ""}
+    ${kids ? `<div class="sec-row"><div class="sec">Sub-tickets <span class="hint">· ${t.children.length}</span></div></div><div class="kids">${kids}</div>` : ""}
+    ${t.body ? `<div class="sec-row"><div class="sec">Description</div></div>${fold(foldKey(t.ref, "desc"), `<div class="body-txt" id="dr-desc">${rich(t.body)}</div>`, { lines: 5, label: "Show full description", fade: "result" })}` : ""}
+    <div class="sec-row"><div class="sec">Timeline</div></div>
     <div class="timeline">${comments || `<div class="empty">no comments yet</div>`}</div>
+    <div class="sec-row"><div class="sec">Agent output <span class="hint">· live terminal</span></div></div>
+    <pre class="term" id="dr-log">${logText ? esc(logText) : "loading…"}</pre>
     <div class="composer">
       <textarea id="dr-comment" placeholder="Add a comment for the agents or yourself…"></textarea>
       <div style="display:flex;gap:7px">
@@ -786,6 +992,7 @@ function renderDrawer(keep) {
   if (caret && cm) { cm.focus({ preventScroll: true }); cm.setSelectionRange(caret[0], caret[1]); }
   else if (actId) { const el = document.getElementById(actId); if (el) el.focus({ preventScroll: true }); }
 
+  wireFolds($("#dr-body"));
   $("#dr-close").onclick = closeDrawer;
   $("#backdrop").onclick = closeDrawer;
   $("#dr-prio").onchange = async (e) => {
@@ -892,10 +1099,15 @@ async function paintLog(ref, elId, lines) {
 }
 
 function openModal(html) {
+  // `wide` is per-modal, so a narrow dialog never inherits the agent drawer's width.
+  $("#modal").classList.remove("wide");
   $("#modal").innerHTML = html;
   $("#modal-wrap").classList.add("show");
 }
-function closeModal() { $("#modal-wrap").classList.remove("show"); }
+function closeModal() {
+  $("#modal-wrap").classList.remove("show");
+  $("#modal").classList.remove("wide");
+}
 
 function newTicketModal() {
   const s = S.snap;
@@ -934,28 +1146,124 @@ function newTicketModal() {
   $("#nt-title").onkeydown = (e) => { if (e.key === "Enter" && (e.metaKey||e.ctrlKey)) $("#m-create").click(); };
 }
 
-function agentsModal() {
+/// Agent settings, as one drawer per agent.
+///
+/// Two levels, because the data has two levels: the agent owns its identity
+/// (name, role, division, enabled, skills, plugins), and its model list is a
+/// ladder of provider groups, each holding one or more models. Nested drawers
+/// rather than columns, so a long ladder never turns the page into a table.
+function agentsModal(openSlug = "") {
   const s = S.snap;
-  const group = s.divisions.map(d => {
+  // draft state is local to the modal: nothing is written until Save
+  const draft = new Map();
+  s.agents.forEach(a => {
+    const ladder = ((s.ladders || {})[a.id] || []).map(m => ({
+      provider: m.provider || "", model: m.model || "", adapter: m.adapter || "",
+      cooldown_until: m.cooldown_until || null,
+    }));
+    draft.set(a.slug, {
+      name: a.name, role: a.role, division: a.division_slug || "",
+      adapter: a.adapter, model: a.model, enabled: a.enabled,
+      skills: (a.skills || []).slice(), plugins: (a.plugins || []).slice(),
+      ladder,
+    });
+  });
+
+  const open = new Set(openSlug ? [openSlug] : []);
+
+  const modelRow = (slug, i, m) => `
+    <div class="mrow" data-i="${i}">
+      <select class="m-prov" title="Provider">
+        ${["", "opencode", "nvidia", "openrouter", "anthropic", "openai", "ollama", "local", "custom"]
+          .map(x => `<option value="${esc(x)}" ${x === m.provider ? "selected" : ""}>${esc(x || "— provider —")}</option>`).join("")}
+      </select>
+      <input class="m-name" value="${esc(m.model)}" placeholder="model id (provider/model)">
+      <select class="m-ad" title="Adapter for this rung">
+        <option value="">inherit</option>
+        ${s.adapters.map(x => `<option ${x === m.adapter ? "selected" : ""}>${x}</option>`).join("")}
+      </select>
+      ${m.cooldown_until ? `<span class="pill cooling" title="cooling down until ${esc(m.cooldown_until)}">cooling</span>` : ""}
+      <button class="btn ghost danger m-del" title="Remove">×</button>
+    </div>`;
+
+  const chipList = (slug, field, values, placeholder) => `
+    <div class="chips" data-field="${field}">
+      ${values.map((v, i) => `<span class="chip">${esc(v)}<button class="chip-x" data-i="${i}" title="Remove">×</button></span>`).join("")}
+      <input class="chip-add" placeholder="${esc(placeholder)}">
+    </div>`;
+
+  const agentDrawer = (a) => {
+    const d = draft.get(a.slug);
+    const isOpen = open.has(a.slug);
+    const ladder = d.ladder;
+    // Group consecutive rungs by provider so the nested level reads as
+    // "here are my opencode models", not as a flat undifferentiated list.
+    const groups = [];
+    ladder.forEach((m, i) => {
+      const g = groups.find(x => x.provider === (m.provider || ""));
+      if (g) g.rows.push({ m, i }); else groups.push({ provider: m.provider || "", rows: [{ m, i }] });
+    });
+
+    return `<div class="adr ${isOpen ? "open" : ""}" data-slug="${esc(a.slug)}">
+      <button class="adr-head" data-adr-toggle="${esc(a.slug)}">
+        <span class="st ${a.status}"></span>
+        <span class="adr-slug">${esc(a.slug)}</span>
+        <span class="adr-name">${esc(d.name)}</span>
+        <span class="pill adr-role ${d.role === "manager" ? "mgr" : ""}">${esc(d.role)}</span>
+        ${a.status === "running" ? `<span class="run">running</span>` : ""}
+        ${d.enabled ? "" : `<span class="pill">off</span>`}
+        <span class="adr-count">${ladder.length ? ladder.length + " model" + (ladder.length === 1 ? "" : "s") : "no fallback"}</span>
+        <span class="chev">▾</span>
+      </button>
+      <div class="adr-body">
+        <div class="row2">
+          <div class="field"><label>Name</label><input class="f-name" value="${esc(d.name)}"></div>
+          <div class="field"><label>Role</label><select class="f-role">${["worker","manager"].map(r => `<option ${r === d.role ? "selected" : ""}>${r}</option>`).join("")}</select></div>
+        </div>
+        <div class="row2">
+          <div class="field"><label>Division</label><select class="f-div">${s.divisions.map(x => `<option value="${esc(x.slug)}" ${x.slug === d.division ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></div>
+          <div class="field"><label>Adapter (primary)</label><select class="f-adapter">${s.adapters.map(x => `<option ${x === d.adapter ? "selected" : ""}>${x}</option>`).join("")}</select></div>
+        </div>
+        <div class="field"><label>Primary model</label><input class="f-model" value="${esc(d.model)}" placeholder="model, or shell command with {{prompt}}"></div>
+        <div class="field"><label>Skills <span class="hint">· rendered per adapter, honoured by hermes</span></label>
+          ${chipList(a.slug, "skills", d.skills, "add a skill and press Enter")}</div>
+        <div class="field"><label>Plugins</label>
+          ${chipList(a.slug, "plugins", d.plugins, "add a plugin and press Enter")}</div>
+        <label class="f-enabled-row"><input type="checkbox" class="f-enabled" ${d.enabled ? "checked" : ""}> enabled (disabled agents take no new work)</label>
+
+        <div class="sec" style="margin-top:12px">Fallback models <span class="hint">· tried top to bottom when the primary fails</span></div>
+        <div class="ladder">
+          ${groups.map(g => `
+            <div class="mgroup">
+              <div class="mgroup-head"><span class="prov">${esc(g.provider || "unspecified provider")}</span><span class="n">${g.rows.length}</span></div>
+              ${g.rows.map(r => modelRow(a.slug, r.i, r.m)).join("")}
+            </div>`).join("") || `<div class="empty">no fallbacks — a provider failure will just fail the ticket</div>`}
+        </div>
+        <div style="display:flex;gap:7px;margin-top:7px">
+          <button class="btn ghost small m-add" data-slug="${esc(a.slug)}">+ Add model</button>
+          <button class="btn ghost small m-clear" data-slug="${esc(a.slug)}" title="Remove cooling-down marks">✕ Clear cooldowns</button>
+        </div>
+
+        <div class="adr-actions">
+          <button class="btn ghost danger ag-del" data-slug="${esc(a.slug)}">Delete agent</button>
+          <button class="btn ag-save" data-slug="${esc(a.slug)}">Save ${esc(a.slug)}</button>
+        </div>
+      </div>
+    </div>`;
+  };
+
+  const groups = s.divisions.map(d => {
     const ags = s.agents.filter(a => a.division_id === d.id);
-    return `<div class="sec" style="margin-top:10px">${esc(d.name)} <span style="color:#3f4759">· ${esc(d.slug)}</span></div>
-      <div class="agents-tbl">${ags.map(a => `
-        <div class="ag" data-slug="${esc(a.slug)}">
-          <span class="s" title="slug (API key)">${esc(a.slug)}${a.status==="running"?`<span class="run">running</span>`:""}</span>
-          <input class="f-name" value="${esc(a.name)}" placeholder="Name">
-          <select class="f-role">${["worker","manager"].map(r => `<option ${r===a.role?"selected":""}>${r}</option>`).join("")}</select>
-          <select class="f-div">${s.divisions.map(x => `<option value="${esc(x.slug)}" ${x.slug===a.division_slug?"selected":""}>${esc(x.name)}</option>`).join("")}</select>
-          <select class="f-adapter">${s.adapters.map(x => `<option ${x===a.adapter?"selected":""}>${x}</option>`).join("")}</select>
-          <input class="f-model" value="${esc(a.model)}" placeholder="model / command" title="model, or shell command with {{prompt}}">
-          <input type="checkbox" class="f-enabled" ${a.enabled?"checked":""} title="enabled">
-          <button class="btn ghost danger ag-del" title="Delete agent" aria-label="Delete agent ${esc(a.slug)}">×</button>
-        </div>`).join("") || `<div class="empty">no agents</div>`}</div>`;
+    if (!ags.length) return "";
+    return `<div class="sec" style="margin-top:14px">${esc(d.name)} <span style="color:#3f4759">· ${esc(d.slug)}</span></div>
+      <div class="adrs">${ags.map(agentDrawer).join("")}</div>`;
   }).join("");
 
-  openModal(`<h3>Agents</h3><p class="sub">Adapters: demo (no model), ollama (local), hermes, opencode, shell (command in model field), echo.</p>
-    ${group}
-    <div class="agents-tbl" style="margin-top:6px"><button class="btn" id="save-agents">Save changes</button></div>
-    <div class="sec" style="margin-top:16px">Add agent</div>
+  openModal(`<h3 class="wide">Agents</h3>
+    <p class="sub">Adapters: demo (no model), ollama (local), hermes, opencode, shell (command in model field), echo.
+       Each agent owns its own fallback ladder — failures rotate down it instead of failing the ticket.</p>
+    <div class="adr-list">${groups || `<div class="empty">no agents</div>`}</div>
+    <div class="sec" style="margin-top:18px">Add agent</div>
     <div class="row2">
       <div class="field"><label>Slug</label><input id="na-slug" placeholder="builder"></div>
       <div class="field"><label>Name</label><input id="na-name" placeholder="Builder"></div>
@@ -965,71 +1273,172 @@ function agentsModal() {
       <div class="field"><label>Role</label><select id="na-role"><option>worker</option><option>manager</option></select></div>
     </div>
     <div class="modal-actions"><button class="btn ghost" id="m-cancel">Close</button><button class="btn" id="na-create">Add agent</button></div>`);
+  $("#modal").classList.add("wide");
 
   $("#m-cancel").onclick = closeModal;
 
-  // Deletes run immediately: the server moves the agent's open tickets to
-  // ?reassign=<slug> or back to triage, and the row leaves the DOM so Save
-  // never PATCHes it.
-  const deleteRow = async (row) => {
-    const slug = row.dataset.slug;
+  // Everything below reads the draft map and re-renders the list in place.
+  const rerender = () => {
+    const scroll = $("#modal").scrollTop;
+    const openNow = [...open];
+    const list = $("#modal").querySelector(".adr-list");
+    list.innerHTML = s.divisions.map(d => {
+      const ags = s.agents.filter(a => a.division_id === d.id);
+      if (!ags.length) return "";
+      return `<div class="sec" style="margin-top:14px">${esc(d.name)} <span style="color:#3f4759">· ${esc(d.slug)}</span></div>
+        <div class="adrs">${ags.map(agentDrawer).join("")}</div>`;
+    }).join("") || `<div class="empty">no agents</div>`;
+    wire();
+    $("#modal").scrollTop = scroll;
+  };
+
+  const wire = () => {
+    const m = $("#modal");
+    m.querySelectorAll("[data-adr-toggle]").forEach(btn => {
+      btn.onclick = () => {
+        const slug = btn.dataset.adrToggle;
+        syncDraft();
+        if (open.has(slug)) open.delete(slug); else open.add(slug);
+        rerender();
+      };
+    });
+    m.querySelectorAll(".chip-add").forEach(inp => {
+      inp.onkeydown = (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        const v = inp.value.trim(); if (!v) return;
+        const slug = inp.closest(".adr").dataset.slug;
+        const field = inp.closest(".chips").dataset.field;
+        const d = draft.get(slug);
+        if (!d[field].includes(v)) d[field].push(v);
+        rerender();
+      };
+    });
+    m.querySelectorAll(".chip-x").forEach(b => {
+      b.onclick = () => {
+        const el = b.closest(".chips");
+        const slug = b.closest(".adr").dataset.slug;
+        draft.get(slug)[el.dataset.field].splice(+b.dataset.i, 1);
+        rerender();
+      };
+    });
+    m.querySelectorAll(".m-add").forEach(b => {
+      b.onclick = () => {
+        syncDraft();
+        draft.get(b.dataset.slug).ladder.push({ provider: "", model: "", adapter: "", cooldown_until: null });
+        rerender();
+      };
+    });
+    m.querySelectorAll(".m-del").forEach(b => {
+      b.onclick = () => {
+        syncDraft();
+        const slug = b.closest(".adr").dataset.slug;
+        draft.get(slug).ladder.splice(+b.closest(".mrow").dataset.i, 1);
+        rerender();
+      };
+    });
+    m.querySelectorAll(".m-clear").forEach(b => {
+      b.onclick = async () => {
+        syncDraft();
+        draft.get(b.dataset.slug).ladder.forEach(r => r.cooldown_until = null);
+        // Persist the cleared cooldowns straight away: they are server state, not
+        // part of the editable draft.
+        try {
+          const ladder = draft.get(b.dataset.slug).ladder;
+          await api(`/api/agents/${encodeURIComponent(b.dataset.slug)}/models`,
+            { method: "PUT", body: { models: ladder.map(r => ({ provider: r.provider, model: r.model, adapter: r.adapter })) } });
+          toast("cooldowns cleared"); load();
+        } catch (e) { toast(e.message, true); }
+        rerender();
+      };
+    });
+    m.querySelectorAll(".ag-save").forEach(b => b.onclick = () => saveAgent(b.dataset.slug));
+    m.querySelectorAll(".ag-del").forEach(b => b.onclick = () => deleteAgent(b.dataset.slug));
+  };
+
+  /// Pull the currently visible inputs back into the draft before any re-render,
+  /// so switching drawers or adding a row never discards unsaved typing.
+  const syncDraft = () => {
+    $("#modal").querySelectorAll(".adr").forEach(el => {
+      const d = draft.get(el.dataset.slug);
+      if (!d) return;
+      const q = (sel) => el.querySelector(sel);
+      if (q(".f-name")) d.name = q(".f-name").value;
+      if (q(".f-role")) d.role = q(".f-role").value;
+      if (q(".f-div")) d.division = q(".f-div").value;
+      if (q(".f-adapter")) d.adapter = q(".f-adapter").value;
+      if (q(".f-model")) d.model = q(".f-model").value;
+      if (q(".f-enabled")) d.enabled = q(".f-enabled").checked;
+      el.querySelectorAll(".mrow").forEach(row => {
+        const i = +row.dataset.i;
+        const r = d.ladder[i]; if (!r) return;
+        r.provider = row.querySelector(".m-prov").value;
+        r.model = row.querySelector(".m-name").value;
+        r.adapter = row.querySelector(".m-ad").value;
+      });
+    });
+  };
+
+  const saveAgent = async (slug) => {
+    syncDraft();
+    const d = draft.get(slug);
+    if (!d.name.trim()) return toast(`name is required for ${slug}`, true);
+    const models = d.ladder.filter(r => r.model.trim() || r.provider.trim());
+    try {
+      await api(`/api/agents/${encodeURIComponent(slug)}`, { method: "PATCH", body: {
+        name: d.name.trim(), role: d.role, division: d.division,
+        adapter: d.adapter, model: d.model, enabled: d.enabled,
+        skills: d.skills, plugins: d.plugins,
+      }});
+      await api(`/api/agents/${encodeURIComponent(slug)}/models`, { method: "PUT",
+        body: { models: models.map(r => ({ provider: r.provider, model: r.model, adapter: r.adapter })) }});
+      toast(`${slug} saved`);
+      await load();
+      rerender();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  // Deleting runs immediately: the server moves the agent's open tickets to
+  // ?reassign=<slug> or back to triage. Same behaviour as before, just moved
+  // into the per-agent drawer.
+  const deleteAgent = async (slug) => {
     if (!window.confirm(`Delete agent ${slug}?`)) return;
     const snap = S.snap;
     const agent = snap.agents.find(a => a.slug === slug) || { id: -1, division_id: null };
     const movable = ["triaged", "queued", "in_progress", "review"];
-    const open = snap.tickets.filter(t => t.assignee_slug === slug && movable.includes(t.status));
-
+    const openTickets = snap.tickets.filter(t => t.assignee_slug === slug && movable.includes(t.status));
     const run = async (reassign) => {
       try {
         const q = reassign ? "?reassign=" + encodeURIComponent(reassign) : "";
         await api("/api/agents/" + encodeURIComponent(slug) + q, { method: "DELETE" });
-        row.remove();
-        toast(`deleted ${slug}${open.length ? ` · ${open.length} ticket${open.length===1?"":"s"} moved` : ""}`);
-        load();
+        toast(`deleted ${slug}${openTickets.length ? ` · ${openTickets.length} ticket${openTickets.length === 1 ? "" : "s"} moved` : ""}`);
+        closeModal(); load();
       } catch (e) { toast(e.message, true); }
     };
-    if (!open.length) return run("");
-
+    if (!openTickets.length) return run("");
     const mates = snap.agents.filter(a => a.id !== agent.id && a.division_id === agent.division_id && a.role === "worker");
+    const row = $(`#modal .adr[data-slug="${CSS.escape(slug)}"]`);
     const strip = document.createElement("div");
     strip.className = "ag-confirm";
-    strip.innerHTML = `<span>${open.length} open ticket${open.length===1?"":"s"}:</span>
-      <select><option value="">— send back to triage —</option>${mates.map(m => `<option value="${esc(m.slug)}">${esc(m.slug)}</option>`).join("")}</select>
+    strip.innerHTML = `<span>${openTickets.length} open ticket${openTickets.length === 1 ? "" : "s"}:</span>
+      <select><option value="">— send back to triage —</option>${mates.map(x => `<option value="${esc(x.slug)}">${esc(x.slug)}</option>`).join("")}</select>
       <button class="btn small ghost" data-x="cancel">Cancel</button>
       <button class="btn small danger" data-x="ok">Delete</button>`;
-    row.after(strip);
+    if (row) row.after(strip); else $("#modal").prepend(strip);
     strip.querySelector('[data-x="cancel"]').onclick = () => strip.remove();
     strip.querySelector('[data-x="ok"]').onclick = () => {
       const reassign = strip.querySelector("select").value;
       strip.remove(); run(reassign);
     };
   };
-  $("#modal").querySelectorAll(".ag-del").forEach(b => { b.onclick = () => deleteRow(b.closest(".ag")); });
 
-  $("#save-agents").onclick = async () => {
-    const rows = [...$("#modal").querySelectorAll(".ag")];
-    for (const r of rows) {
-      if (!r.querySelector(".f-name").value.trim()) return toast("name is required for " + r.dataset.slug, true);
-    }
-    try {
-      for (const r of rows) {
-        await api("/api/agents/" + encodeURIComponent(r.dataset.slug), {method:"PATCH", body:{
-          name: r.querySelector(".f-name").value.trim(),
-          role: r.querySelector(".f-role").value,
-          division: r.querySelector(".f-div").value,
-          adapter: r.querySelector(".f-adapter").value,
-          model: r.querySelector(".f-model").value,
-          enabled: r.querySelector(".f-enabled").checked,
-        }});
-      }
-      toast("agents saved"); closeModal(); load();
-    } catch (e) { toast(e.message, true); }
-  };
+  wire();
+
   $("#na-create").onclick = async () => {
     try {
-      await api("/api/agents", {method:"POST", body:{
-        slug:$("#na-slug").value.trim(), name:$("#na-name").value.trim() || $("#na-slug").value.trim(),
-        role:$("#na-role").value, division:$("#na-div").value, adapter:"demo"
+      await api("/api/agents", { method: "POST", body: {
+        slug: $("#na-slug").value.trim(), name: $("#na-name").value.trim() || $("#na-slug").value.trim(),
+        role: $("#na-role").value, division: $("#na-div").value, adapter: "demo",
       }});
       toast("agent added"); closeModal(); load();
     } catch (e) { toast(e.message, true); }
@@ -1086,39 +1495,22 @@ $("#dr-close").onclick = closeDrawer;
 $("#backdrop").onclick = closeDrawer;
 $("#modal-wrap").onclick = (e) => { if (e.target.id === "modal-wrap") closeModal(); };
 
-let focusKey = null;
-function openFocus(kind) {
-  const log = kind === "log";
-  const el = $(log ? "#dr-log" : kind === "result" ? "#dr-result" : "#dr-desc");
-  const src = log ? (el?.textContent || "") : (el?.innerText || "");
-  if (!src.trim()) return;
-  const key = kind + "|" + (S.openRef || "");
-  if (focusKey === key && $("#focus-wrap").classList.contains("show")) return;   // same view: keep scroll
-  focusKey = key;
-  $("#focus-title").textContent = log ? "Agent output" : kind === "result" ? "Result" : "Description";
-  $("#focus-ref").textContent = S.openRef || "";
-  const body = $("#focus-body");
-  body.className = "focus-body" + (log ? "" : " prose");
-  body.textContent = src;
-  body.scrollTop = log ? body.scrollHeight : 0;   // logs follow the tail, prose starts at the top
-  $("#focus-wrap").classList.add("show");
-}
-function closeFocus(){ $("#focus-wrap").classList.remove("show"); focusKey = null; }
-$("#focus-close").onclick = closeFocus;
-$("#focus-copy").onclick = async () => {
-  const b = $("#focus-copy");
-  try { await navigator.clipboard.writeText($("#focus-body").textContent); b.textContent = "copied"; }
-  catch { b.textContent = "copy failed"; }
-  setTimeout(() => (b.textContent = "copy"), 1200);
-};
+// The old "expand" modal is gone: blocks expand in place now (see wireFolds).
+// What remains here is cross-referencing, which is a different job.
 document.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-focus]");
-  if (btn) { e.preventDefault(); openFocus(btn.dataset.focus); return; }
+  // A failure tag inside a card filters the board rather than opening the
+  // ticket: the tag is a question about the whole board ("what else broke the
+  // same way?"), not about this one card.
+  const tag = e.target.closest(".card [data-kind]");
+  if (tag) {
+    e.preventDefault(); e.stopPropagation();
+    S.fail = S.fail === tag.dataset.kind ? "" : tag.dataset.kind;
+    saveView(); renderFailbar(); renderBoard();
+    return;
+  }
   const ref = e.target.closest("[data-ref]");
   if (ref) { e.preventDefault(); openTicket(ref.dataset.ref); return; }
-  if (e.target.id === "focus-wrap") closeFocus();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeFocus(); });
 
 // drawer width: drag the left edge, remember it, double-click to go full width
 const DRW_KEY = "bureau_drawer_w";

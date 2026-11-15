@@ -337,6 +337,8 @@ Bearer`, a cookie, or `?token=`. `/` and `/api/health` stay open.
 | POST | `/api/tickets/{ref}/assign` | assign to agent slug |
 | POST | `/api/tickets/{ref}/claim` | claim with a 1 h lease |
 | GET | `/api/tickets/{ref}/log` | tail of the agent transcript |
+| GET | `/api/tickets/{ref}` | also returns `attempts[]` — every failed run, classified |
+| GET/PUT | `/api/agents/{slug}/models` | the agent's fallback ladder, in try order |
 | GET/POST | `/api/divisions` | list / create |
 | POST / DELETE | `/api/divisions/{slug}/pause` | pause / resume a division |
 | GET/POST | `/api/agents` | list / create |
@@ -392,6 +394,56 @@ Agent integration details: `docs/AGENT-INTEGRATION.md`.
 
 Stopping the service: `pidof bureau` to find it — `pkill -f 'bureau serve'` also
 matches the shell that runs it.
+
+---
+
+## Failures, tags and model rotation
+
+Every failed run is **classified**, not just recorded. The kind is stored per
+attempt and shown as a tag on the card and in the drawer, so a board full of
+red says *what* is wrong instead of just *that* something is.
+
+| kind | means | next move |
+|---|---|---|
+| `rate_limit` | 429 / provider throttling | retry once, then next model |
+| `quota` | free tier or plan exhausted | next model immediately |
+| `auth` | bad or missing credential | next model immediately |
+| `provider_down` | 5xx, overloaded, socket closed | retry once, then next model |
+| `content_safety` | the provider refused the request | next model immediately |
+| `timeout` | hit the wall-clock budget | **stops** for a human |
+| `model_output` | answered, but not to contract (bad JSON) | **stops** for a human |
+| `tooling` | a local tool was missing (ripgrep, dotnet) | fails — another model cannot help |
+| `unknown` | no signature matched | fails |
+
+Detection looks at the **tail** of the agent output first, where CLIs write
+their real errors, so a 429 buried under thousands of lines of narration is
+still found, and the one-line reason on the card is the matching line rather
+than the whole blob.
+
+**Rotation is deliberately conservative.** Only provider-side failures walk the
+ladder. A two-hour timeout or a half-finished run is parked for a human,
+because the agent may already have committed — replaying that prompt on a
+different model would be a second implementation, not a retry.
+
+Give an agent a ladder from the board (Agents → agent → Fallback models) or via
+the API. Rungs are tried top to bottom; a rung that fails for an infrastructure
+reason gets a cooldown (`rate_limit` 60 s, `provider_down` 5 min, `quota` 6 h,
+`auth` 24 h) so the next ticket skips it instead of rediscovering it.
+
+```bash
+curl -X PUT localhost:8787/api/agents/tamis/models -H 'content-type: application/json' -d '{
+  "models": [
+    {"provider": "nvidia",     "model": "nvidia/minimaxai/minimax-m3.1-flash", "adapter": "opencode"},
+    {"provider": "openrouter", "model": "deepseek/v4.1",                       "adapter": "opencode"},
+    {"provider": "ollama",     "model": "qwen3.8:27b",                          "adapter": "ollama"}
+  ]}'
+```
+
+### Per-agent skills and plugins
+
+Agents carry typed `skills` and `plugins` lists. The `hermes` adapter passes
+them as `--skill` / `--plugin`; the other adapters store them and log a warning
+that they cannot be applied, rather than pretending they took effect.
 
 ---
 

@@ -183,7 +183,12 @@ async fn board_ui_keeps_persistence_and_poll_contracts() {
         "bodyHeight * 0.5",                // drawer scroll restore guarded against content loss
         "newLog.scrollTop = S.logPin.top", // agent log keeps its place
         "cm.value = draftVal",             // half-typed comment survives a poll
-        "data-focus",                      // full-size description/log overlay
+        "wireFolds",                       // blocks expand in place, not in a modal
+        "data-fold-toggle",                // ...with a real toggle button
+        "failure_totals",                  // board can group failures by kind
+        "fk-rate_limit",                   // failure tags have their own palette
+        "ladders",                         // per-agent fallback chains reach the UI
+        "/models",                         // the ladder has its own endpoint
         "f-div",                           // agent editor can move divisions
         "ag-del",                          // agent editor has a delete button
         "?reassign=",                      // delete can hand open tickets to a teammate
@@ -191,6 +196,13 @@ async fn board_ui_keeps_persistence_and_poll_contracts() {
         ".call(history", // unbound pushState/replaceState throws "Illegal invocation"
     ] {
         assert!(html.contains(needle), "board is missing `{needle}`");
+    }
+    // The old overlay is deliberately gone: expanding must happen in place.
+    for gone in ["focus-wrap", "openFocus", "data-focus"] {
+        assert!(
+            !html.contains(gone),
+            "board still ships `{gone}`; expansion belongs inline now"
+        );
     }
 }
 
@@ -651,4 +663,107 @@ async fn delete_agent_refuses_running_and_unknown() {
         body["error"].as_str().unwrap().contains("not found"),
         "{body}"
     );
+}
+
+
+#[tokio::test]
+async fn agent_ladder_round_trips_and_labels_its_provider() {
+    let (app, db) = setup();
+
+    // A provider-less rung inherits the model spec's own prefix, so the board
+    // does not have to repeat it.
+    let (status, body) = send(
+        &app,
+        "PUT",
+        "/api/agents/w1/models",
+        Some(json!({ "models": [
+            { "provider": "", "model": "nvidia/minimax-m3", "adapter": "opencode" },
+            { "provider": "openrouter", "model": "deepseek/v4", "adapter": "" }
+        ]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let models = body["models"].as_array().expect("models array");
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0]["provider"], "nvidia");
+    assert_eq!(models[1]["provider"], "openrouter");
+    // Position is the order they will be tried in.
+    assert_eq!(models[0]["position"], 0);
+    assert_eq!(models[1]["position"], 1);
+
+    // The snapshot carries the ladder so the drawer can render without a
+    // second round trip.
+    let (_, snap) = send(&app, "GET", "/api/state", None).await;
+    let ladders = snap["ladders"].as_object().expect("ladders");
+    assert!(ladders.values().any(|v| v.as_array().is_some_and(|a| a.len() == 2)));
+
+    // Replacing it wholesale drops the old rungs rather than appending.
+    let (status, body) = send(
+        &app,
+        "PUT",
+        "/api/agents/w1/models",
+        Some(json!({ "models": [ { "provider": "local", "model": "qwen3", "adapter": "ollama" } ]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["models"].as_array().unwrap().len(), 1);
+
+    let conn = db.lock().unwrap();
+    let agent = db::agent_by_slug(&conn, "w1").unwrap().unwrap();
+    assert_eq!(db::agent_models(&conn, agent.id).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_failed_attempt_is_classified_and_served_with_the_ticket() {
+    let (app, db) = setup();
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/api/tickets",
+        Some(json!({ "title": "t", "body": "", "division": "test", "priority": 2 })),
+    )
+    .await;
+    let ticket_id = created["ticket"]["id"].as_i64().unwrap();
+    let rref = created["ticket"]["ref"].as_str().unwrap().to_string();
+
+    let (agent, provider) = {
+        let conn = db.lock().unwrap();
+        let a = db::agent_by_slug(&conn, "w1").unwrap().unwrap();
+        // Record the same shape real failures have: noise, then the error.
+        let raw = format!("{}Error: Too Many Requests: {{\"status\":429}}", "step\n".repeat(300));
+        let c = bureau::failure::classify(&raw, Some(1));
+        assert_eq!(c.kind, bureau::failure::FailureKind::RateLimit);
+        db::record_attempt(
+            &conn,
+            ticket_id,
+            &a,
+            bureau::rotation::provider_of("nvidia/minimax-m3"),
+            c.kind.as_str(),
+            &c.detail,
+            &raw,
+        )
+        .unwrap();
+        db::set_status(&conn, ticket_id, "failed").unwrap();
+        (a.clone(), "nvidia")
+    };
+    assert_eq!(agent.slug, "w1");
+    assert_eq!(provider, "nvidia");
+
+    let (status, body) = send(&app, "GET", &format!("/api/tickets/{rref}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let attempts = body["attempts"].as_array().expect("attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["kind"], "rate_limit");
+    assert_eq!(attempts[0]["provider"], "nvidia");
+    assert!(
+        attempts[0]["detail"].as_str().unwrap().contains("429"),
+        "the detail must be the matching line, not the whole blob"
+    );
+
+    // The board's tally counts distinct tickets, so one ticket failing ten
+    // times cannot masquerade as a systemic outage.
+    let (_, snap) = send(&app, "GET", "/api/state", None).await;
+    assert_eq!(snap["failure_totals"]["rate_limit"], 1);
+    let card = snap["attempts"].as_object().unwrap();
+    assert!(card.contains_key(&ticket_id.to_string()), "snapshot labels the card");
 }
