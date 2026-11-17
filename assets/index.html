@@ -619,7 +619,7 @@ const ago = (iso) => {
 const COLS = [
   {id:"new", label:"New", st:["new"]},
   {id:"queued", label:"Queued", st:["triaged","queued"]},
-  {id:"working", label:"In progress", st:["in_progress"]},
+  {id:"working", label:"In progress", st:["in_progress","testing"]},
   {id:"review", label:"Review", st:["review"]},
   {id:"done", label:"Done", st:["done"]},
   {id:"attention", label:"Blocked", st:["blocked","failed"]},
@@ -767,7 +767,7 @@ function renderRail() {
       <span class="dot" style="background:#7c9cff"></span>
       <span class="nm">All divisions</span><span class="cnt ${open?"hot":""}">${open}</span></button>`;
   s.divisions.forEach((d,i) => {
-    const n = d.counts.new + d.counts.triaged + d.counts.queued + d.counts.in_progress + d.counts.blocked + d.counts.failed;
+    const n = d.counts.new + d.counts.triaged + d.counts.queued + d.counts.in_progress + d.counts.testing + d.counts.blocked + d.counts.failed;
     const paused = !!d.paused;
     html += `<button class="divlink ${S.division===d.slug?"active":""}${paused?" paused":""}" data-div="${esc(d.slug)}" title="${esc(d.project_path)}${paused?" — paused: new work will not start":""}">
       <span class="dot ${divColor(i)}"></span>

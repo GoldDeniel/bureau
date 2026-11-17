@@ -411,15 +411,20 @@ async fn create_agent(
     let conn = st.db.lock().unwrap();
     let division = db::division_by_slug(&conn, &body.division)?
         .ok_or_else(|| anyhow::anyhow!("division {} not found", body.division))?;
+    let role = match body.role.as_str() {
+        "manager" | "worker" | "tester" => body.role.as_str(),
+        other => {
+            return Err(anyhow::anyhow!(
+                "invalid role '{other}': expected 'manager', 'worker' or 'tester'"
+            )
+            .into());
+        }
+    };
     let id = db::create_agent(
         &conn,
         &body.slug,
         &body.name,
-        if body.role == "manager" {
-            "manager"
-        } else {
-            "worker"
-        },
+        role,
         Some(division.id),
         &body.adapter,
         &body.model,
@@ -971,25 +976,27 @@ async fn create_ticket(
     let conn = st.db.lock().unwrap();
     let division = db::division_by_slug(&conn, &body.division)?
         .ok_or_else(|| anyhow::anyhow!("division {} not found", body.division))?;
-    let (assignee, handed_to) = match &body.assignee {
+    let (assignee, handed_to, status) = match &body.assignee {
         Some(slug) if !slug.is_empty() => {
             let agent = db::agent_by_slug(&conn, slug)?
                 .ok_or_else(|| anyhow::anyhow!("agent {} not found", slug))?;
             if agent.role == "manager" {
                 // A manager is a triager, not a worker: assigning to one means
                 // "let this manager break it down", so keep it unassigned.
-                (None, Some(agent.slug))
+                (None, Some(agent.slug), "new")
+            } else if agent.role == "tester" {
+                // A tester is never handed queued build work.
+                (Some(agent.id), None, "testing")
             } else {
-                (Some(agent.id), None)
+                (Some(agent.id), None, "queued")
             }
         }
-        _ => (None, None),
+        _ => (None, None, "new"),
     };
     let parent_id = match &body.parent {
         Some(p) if !p.is_empty() => Some(ticket_or_404!(conn, p.clone()).id),
         _ => None,
     };
-    let status = if assignee.is_some() { "queued" } else { "new" };
     let ticket = db::create_ticket(
         &conn,
         division.id,
@@ -1187,7 +1194,12 @@ fn assign_to(conn: &rusqlite::Connection, ticket: &db::Ticket, slug: &str) -> an
         )?;
     } else {
         db::set_assignee(conn, ticket.id, Some(agent.id))?;
-        if matches!(ticket.status.as_str(), "new" | "triaged") {
+        if agent.role == "tester" {
+            // A tester is never handed queued build work.
+            if matches!(ticket.status.as_str(), "new" | "triaged" | "queued") {
+                db::set_status(conn, ticket.id, "testing")?;
+            }
+        } else if matches!(ticket.status.as_str(), "new" | "triaged") {
             db::set_status(conn, ticket.id, "queued")?;
         }
         db::add_event(

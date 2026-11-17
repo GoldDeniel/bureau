@@ -601,15 +601,17 @@ async fn main() -> Result<()> {
                 } => {
                     let div = db::division_by_slug(&conn, &division)?
                         .with_context(|| no_division(&division, &cli.db))?;
+                    let role = match role.as_str() {
+                        "manager" | "worker" | "tester" => role.as_str(),
+                        other => anyhow::bail!(
+                            "invalid role '{other}': expected 'manager', 'worker' or 'tester'"
+                        ),
+                    };
                     db::create_agent(
                         &conn,
                         &slug,
                         &name,
-                        if role == "manager" {
-                            "manager"
-                        } else {
-                            "worker"
-                        },
+                        role,
                         Some(div.id),
                         &adapter,
                         &model,

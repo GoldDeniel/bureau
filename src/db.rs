@@ -8,11 +8,12 @@ use std::sync::{Arc, Mutex};
 
 pub type Db = Arc<Mutex<Connection>>;
 
-pub const STATUSES: [&str; 8] = [
+pub const STATUSES: [&str; 9] = [
     "new",
     "triaged",
     "queued",
     "in_progress",
+    "testing",
     "review",
     "done",
     "blocked",
@@ -41,7 +42,7 @@ CREATE TABLE IF NOT EXISTS agents (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     slug        TEXT NOT NULL UNIQUE,
     name        TEXT NOT NULL,
-    role        TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('manager','worker')),
+    role        TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('manager','worker','tester')),
     division_id INTEGER REFERENCES divisions(id) ON DELETE CASCADE,
     adapter     TEXT NOT NULL DEFAULT 'demo',
     model       TEXT NOT NULL DEFAULT '',
@@ -84,7 +85,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     title       TEXT NOT NULL,
     body        TEXT NOT NULL DEFAULT '',
     status      TEXT NOT NULL DEFAULT 'new'
-                CHECK (status IN ('new','triaged','queued','in_progress','review','done','blocked','failed')),
+                CHECK (status IN ('new','triaged','queued','in_progress','testing','review','done','blocked','failed')),
     priority    INTEGER NOT NULL DEFAULT 2,
     assignee_id INTEGER REFERENCES agents(id) ON DELETE SET NULL,
     created_by  TEXT NOT NULL DEFAULT 'human',
@@ -203,6 +204,13 @@ pub fn open(path: &str) -> Result<Db> {
     if !has_column(&conn, "agents", "plugin_profile")? {
         conn.execute("ALTER TABLE agents ADD COLUMN plugin_profile TEXT", [])?;
     }
+    // The allowed role/status values live in a CHECK, and SQLite cannot alter one
+    // in place. Databases created before testers existed keep the old list, so
+    // rebuild those two tables once; on a fresh database this is a no-op.
+    add_check_value(&conn, "agents", "'manager','worker'", "'tester'")?;
+    add_check_value(&conn, "tickets", "'blocked','failed'", "'testing'")?;
+    // A rebuild drops the table's indexes; recreate them.
+    conn.execute_batch(SCHEMA)?;
     // A crash leaves agents marked running; nothing can actually be running at boot.
     conn.execute("UPDATE agents SET status='idle' WHERE status='running'", [])?;
     conn.execute(
@@ -222,6 +230,58 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// SQLite cannot alter a CHECK constraint. When a stored CREATE TABLE still has
+/// the old value list, rebuild the table with `add` appended: rename, create,
+/// copy every column, drop. Code validation stays authoritative either way.
+fn add_check_value(conn: &Connection, table: &str, old: &str, add: &str) -> Result<()> {
+    let sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+        [table],
+        |r| r.get(0),
+    )?;
+    if sql.contains(add) || !sql.contains(old) {
+        return Ok(());
+    }
+    let new_sql = sql.replacen(old, &format!("{old},{add}"), 1);
+    let columns = table_columns(conn, table)?.join(", ");
+    // Child tables must keep pointing at `table`: legacy_alter_table stops the
+    // rename from rewriting their REFERENCES, and foreign_keys=OFF stops the old
+    // rows from cascading into them when the table is dropped.
+    let seq: Option<i64> = conn
+        .query_row("SELECT seq FROM sqlite_sequence WHERE name=?1", [table], |r| r.get(0))
+        .optional()
+        .unwrap_or(None);
+    conn.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;")?;
+    let rebuilt = conn.execute_batch(&format!(
+        "BEGIN;
+         ALTER TABLE {table} RENAME TO {table}_old;
+         {new_sql};
+         INSERT INTO {table} ({columns}) SELECT {columns} FROM {table}_old;
+         DROP TABLE {table}_old;
+         COMMIT;"
+    ));
+    if rebuilt.is_err() {
+        conn.execute_batch("ROLLBACK").ok();
+    }
+    conn.execute_batch("PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON;")?;
+    rebuilt?;
+    // Keep the AUTOINCREMENT counter: a deleted highest row must not hand out a
+    // ref that was already used.
+    if let Some(seq) = seq {
+        conn.execute(
+            "UPDATE sqlite_sequence SET seq = MAX(seq, ?1) WHERE name = ?2",
+            params![seq, table],
+        )?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- models
@@ -287,6 +347,7 @@ pub struct Counts {
     pub triaged: i64,
     pub queued: i64,
     pub in_progress: i64,
+    pub testing: i64,
     pub review: i64,
     pub done: i64,
     pub blocked: i64,
@@ -300,6 +361,7 @@ impl Counts {
             "triaged" => self.triaged = n,
             "queued" => self.queued = n,
             "in_progress" => self.in_progress = n,
+            "testing" => self.testing = n,
             "review" => self.review = n,
             "done" => self.done = n,
             "blocked" => self.blocked = n,
@@ -312,6 +374,7 @@ impl Counts {
             + self.triaged
             + self.queued
             + self.in_progress
+            + self.testing
             + self.review
             + self.done
             + self.blocked
@@ -583,6 +646,19 @@ pub fn workers_for(conn: &Connection, division_id: i64) -> Result<Vec<Agent>> {
     Ok(out)
 }
 
+/// Testers are a separate roster: they never appear in `workers_for`, so no
+/// build-work pick can hand a tester a queued ticket.
+pub fn testers_for(conn: &Connection, division_id: i64) -> Result<Vec<Agent>> {
+    let sql = format!(
+        "{AGENT_SELECT} WHERE a.division_id = ?1 AND a.role = 'tester' AND a.enabled = 1 ORDER BY a.id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let out = stmt
+        .query_map([division_id], map_agent)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(out)
+}
+
 pub fn manager_for(conn: &Connection, division_id: i64) -> Result<Option<Agent>> {
     let sql = format!("{AGENT_SELECT} WHERE a.division_id = ?1 AND a.role = 'manager'");
     Ok(conn.query_row(&sql, [division_id], map_agent).optional()?)
@@ -712,9 +788,12 @@ pub fn validate_plugin_profile(name: &str) -> Result<Option<String>> {
 /// constraint a patch can hit; it is reported as a plain API error.
 pub fn update_agent(conn: &Connection, slug: &str, p: &AgentPatch) -> Result<()> {
     if let Some(role) = &p.role
-        && !matches!(role.as_str(), "manager" | "worker")
+        && !matches!(role.as_str(), "manager" | "worker" | "tester")
     {
-        anyhow::bail!("invalid role '{}': expected 'manager' or 'worker'", role);
+        anyhow::bail!(
+            "invalid role '{}': expected 'manager', 'worker' or 'tester'",
+            role
+        );
     }
     let division_id = match &p.division {
         Some(div) => Some(
@@ -1269,15 +1348,41 @@ pub fn set_title_body(conn: &Connection, id: i64, title: &str, body: &str) -> Re
     Ok(())
 }
 
+/// Work a role may pick up, and the only statuses a claim can consume.
+/// Workers build (`queued`, `new`); testers test (`testing`). Testers never take
+/// build work and workers never see a ticket that is under test.
+pub fn can_claim(role: &str, status: &str) -> bool {
+    match status {
+        "queued" | "new" => role == "worker",
+        "testing" => role == "tester",
+        _ => false,
+    }
+}
+
 /// Atomically move a ticket to in_progress, bump attempts and take a lease.
 pub fn claim(conn: &Connection, id: i64, agent_id: i64, lease_secs: i64) -> Result<bool> {
+    let seen: Option<(String, String)> = conn
+        .query_row(
+            "SELECT a.role, t.status FROM tickets t JOIN agents a ON a.id = ?1 WHERE t.id = ?2",
+            params![agent_id, id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((role, status)) = seen else {
+        return Ok(false);
+    };
+    if !can_claim(&role, &status) {
+        return Ok(false);
+    }
     let lease = (Utc::now() + chrono::Duration::seconds(lease_secs))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // Pinning the status keeps this atomic against a parallel claim: only one
+    // update can still match the status we checked.
     let n = conn.execute(
         "UPDATE tickets SET status='in_progress', assignee_id=?1, attempts=attempts+1,
                             lease_until=?2, updated_at=?3
-         WHERE id=?4 AND status IN ('queued','new')",
-        params![agent_id, lease, now(), id],
+         WHERE id=?4 AND status=?5",
+        params![agent_id, lease, now(), id, status],
     )?;
     Ok(n == 1)
 }
@@ -1329,8 +1434,10 @@ pub fn new_unassigned(conn: &Connection, division_id: i64) -> Result<Option<Tick
 }
 
 pub fn queued_for_agent(conn: &Connection, agent_id: i64) -> Result<Option<Ticket>> {
+    // Role-guarded: a tester must never be handed queued build work.
     let sql = format!(
         "{TICKET_SELECT} WHERE t.assignee_id = ?1 AND t.status = 'queued'
+         AND EXISTS (SELECT 1 FROM agents a WHERE a.id = ?1 AND a.role = 'worker')
          ORDER BY t.priority ASC, t.id ASC LIMIT 1"
     );
     let mut t = match conn.query_row(&sql, [agent_id], map_ticket).optional()? {
@@ -2185,5 +2292,164 @@ mod tests {
 
         let err = apply_agent_toggles(&conn, "ghost", &[], &[]).unwrap_err().to_string();
         assert!(err.contains("agent ghost not found"), "{err}");
+    }
+
+    #[test]
+    fn tester_role_is_accepted_and_unknown_roles_rejected() {
+        let db = mem();
+        let conn = db.lock().unwrap();
+        let div = create_division(&conn, "hexa", "Hexa", "", "/tmp").unwrap();
+        create_agent(&conn, "qa", "QA", "tester", Some(div), "demo", "", "").unwrap();
+        assert_eq!(agent_by_slug(&conn, "qa").unwrap().unwrap().role, "tester");
+
+        create_agent(&conn, "builder", "B", "worker", Some(div), "demo", "", "").unwrap();
+        let promote = AgentPatch {
+            role: Some("tester".into()),
+            ..Default::default()
+        };
+        update_agent(&conn, "builder", &promote).unwrap();
+        assert_eq!(agent_by_slug(&conn, "builder").unwrap().unwrap().role, "tester");
+
+        let bogus = AgentPatch {
+            role: Some("bogus".into()),
+            ..Default::default()
+        };
+        let err = update_agent(&conn, "builder", &bogus).unwrap_err().to_string();
+        assert!(err.contains("invalid role 'bogus'"), "{err}");
+        assert_eq!(
+            agent_by_slug(&conn, "builder").unwrap().unwrap().role,
+            "tester",
+            "a rejected role must not change the row"
+        );
+    }
+
+    #[test]
+    fn testing_tickets_are_claimable_only_by_testers() {
+        let db = mem();
+        let conn = db.lock().unwrap();
+        let div = create_division(&conn, "hexa", "Hexa", "", "/tmp").unwrap();
+        let worker = create_agent(&conn, "builder", "B", "worker", Some(div), "demo", "", "").unwrap();
+        let tester = create_agent(&conn, "qa", "QA", "tester", Some(div), "demo", "", "").unwrap();
+
+        let testing =
+            create_ticket(&conn, div, None, "Verify", "", 2, Some(tester), "manager", "testing")
+                .unwrap();
+        assert!(
+            !claim(&conn, testing.id, worker, 60).unwrap(),
+            "a worker must not claim a testing ticket"
+        );
+        assert!(
+            claim(&conn, testing.id, tester, 60).unwrap(),
+            "the tester owns this stage"
+        );
+
+        // Testers never get queued build work.
+        let queued =
+            create_ticket(&conn, div, None, "Build", "", 2, Some(tester), "manager", "queued")
+                .unwrap();
+        assert!(queued_for_agent(&conn, tester).unwrap().is_none());
+        assert!(!claim(&conn, queued.id, tester, 60).unwrap());
+        assert!(claim(&conn, queued.id, worker, 60).unwrap());
+    }
+
+    #[test]
+    fn workers_for_excludes_testers() {
+        let db = mem();
+        let conn = db.lock().unwrap();
+        let div = create_division(&conn, "hexa", "Hexa", "", "/tmp").unwrap();
+        create_agent(&conn, "builder", "B", "worker", Some(div), "demo", "", "").unwrap();
+        create_agent(&conn, "qa", "QA", "tester", Some(div), "demo", "", "").unwrap();
+        create_agent(&conn, "off", "Off", "tester", Some(div), "demo", "", "").unwrap();
+        update_agent(
+            &conn,
+            "off",
+            &AgentPatch {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let workers: Vec<String> = workers_for(&conn, div).unwrap().into_iter().map(|a| a.slug).collect();
+        assert_eq!(workers, vec!["builder"]);
+        let testers: Vec<String> = testers_for(&conn, div).unwrap().into_iter().map(|a| a.slug).collect();
+        assert_eq!(testers, vec!["qa"]);
+    }
+
+    #[test]
+    fn status_counts_include_testing() {
+        let db = mem();
+        let conn = db.lock().unwrap();
+        let div = create_division(&conn, "hexa", "Hexa", "", "/tmp").unwrap();
+        create_ticket(&conn, div, None, "Verify", "", 2, None, "human", "testing").unwrap();
+        create_ticket(&conn, div, None, "Build", "", 2, None, "human", "queued").unwrap();
+
+        let d = divisions(&conn).unwrap().remove(0);
+        assert_eq!(d.counts.testing, 1);
+        assert_eq!(d.counts.queued, 1);
+        assert_eq!(d.total, 2);
+        assert!(STATUSES.contains(&"testing"));
+    }
+
+    #[test]
+    fn old_database_gains_tester_role_and_testing_status() {
+        let path = tmp("migrate-tester");
+        std::fs::create_dir_all(&path).unwrap();
+        let file = path.join("old.db").to_string_lossy().into_owned();
+        {
+            let conn = Connection::open(&file).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE agents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slug TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('manager','worker')),
+                    division_id INTEGER,
+                    adapter TEXT NOT NULL DEFAULT 'demo',
+                    model TEXT NOT NULL DEFAULT '',
+                    system_hint TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'idle',
+                    created_at TEXT NOT NULL);
+                 INSERT INTO agents (slug, name, created_at)
+                 VALUES ('old', 'Old', '2026-01-01T00:00:00Z');
+                 CREATE TABLE tickets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ref TEXT UNIQUE,
+                    division_id INTEGER NOT NULL,
+                    parent_id INTEGER,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'new'
+                        CHECK (status IN ('new','triaged','queued','in_progress','review','done','blocked','failed')),
+                    priority INTEGER NOT NULL DEFAULT 2,
+                    assignee_id INTEGER,
+                    created_by TEXT NOT NULL DEFAULT 'human',
+                    result TEXT NOT NULL DEFAULT '',
+                    agent_notes TEXT NOT NULL DEFAULT '',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    lease_until TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL);
+                 INSERT INTO tickets (division_id, title, created_at, updated_at)
+                 VALUES (1, 'Old work', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+        let db = open(&file).unwrap();
+        let conn = db.lock().unwrap();
+        let div = create_division(&conn, "hexa", "Hexa", "", "/tmp").unwrap();
+        // Both new values must pass the CHECK that older databases stored.
+        create_agent(&conn, "qa", "QA", "tester", Some(div), "demo", "", "").unwrap();
+        create_agent(&conn, "old", "Old", "worker", None, "demo", "", "").unwrap();
+        create_ticket(&conn, div, None, "Verify", "", 2, None, "human", "testing").unwrap();
+        assert_eq!(
+            ticket_by_id(&conn, 1).unwrap().unwrap().title,
+            "Old work",
+            "existing rows must survive the rebuild"
+        );
+        assert_eq!(agent_by_slug(&conn, "old").unwrap().unwrap().name, "Old");
+        drop(conn);
+        std::fs::remove_dir_all(&path).ok();
     }
 }
