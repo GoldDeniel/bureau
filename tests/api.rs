@@ -80,6 +80,69 @@ async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (St
     send_with(app, method, uri, body, &[]).await
 }
 
+fn setup_tester_workflow(with_tester: bool) -> (Db, i64, i64) {
+    let db = db::open(&temp_db_path()).unwrap();
+    let (division_id, worker_id) = {
+        let conn = db.lock().unwrap();
+        let division_id = db::create_division(&conn, "test", "Test Division", "charter", "/tmp")
+            .unwrap();
+        db::create_agent(
+            &conn,
+            "mgr",
+            "Manager",
+            "manager",
+            Some(division_id),
+            "demo",
+            "",
+            "",
+        )
+        .unwrap();
+        let worker_id = db::create_agent(
+            &conn,
+            "w1",
+            "Worker One",
+            "worker",
+            Some(division_id),
+            "demo",
+            "",
+            "",
+        )
+        .unwrap();
+        if with_tester {
+            db::create_agent(
+                &conn,
+                "qa",
+                "QA",
+                "tester",
+                Some(division_id),
+                "demo",
+                "",
+                "",
+            )
+            .unwrap();
+        }
+        (division_id, worker_id)
+    };
+    (db, division_id, worker_id)
+}
+
+fn workflow_ticket(db: &Db, division_id: i64, worker_id: i64, body: &str) -> i64 {
+    let conn = db.lock().unwrap();
+    db::create_ticket(
+        &conn,
+        division_id,
+        None,
+        "Verify worker result",
+        body,
+        2,
+        Some(worker_id),
+        "human",
+        "queued",
+    )
+    .unwrap()
+    .id
+}
+
 #[tokio::test]
 async fn tester_role_create_and_update_succeed() {
     let (app, db) = setup();
@@ -158,6 +221,67 @@ async fn tester_role_rejections_leave_agents_unchanged() {
     let after = serde_json::to_value(db::agents(&conn, None).unwrap()).unwrap();
     assert_eq!(after, before);
     assert!(db::agent_by_slug(&conn, "wizard").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn tester_workflow_pass_reaches_review_without_failure() {
+    let (db, division_id, worker_id) = setup_tester_workflow(true);
+    let ticket_id = workflow_ticket(&db, division_id, worker_id, "Acceptance criteria");
+
+    let report = bureau::dispatch::tick(db.clone(), 4, 3).await.unwrap();
+    assert_eq!(report.workers_started, 1, "{report:?}");
+    assert_eq!(report.testers_started, 1, "{report:?}");
+
+    let conn = db.lock().unwrap();
+    let ticket = db::ticket_by_id(&conn, ticket_id).unwrap().unwrap();
+    assert_eq!(ticket.status, "review");
+    assert_eq!(db::testers_for(&conn, division_id).unwrap().len(), 1);
+    assert!(db::attempts_for(&conn, ticket_id, 50).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn tester_workflow_fail_requeues_with_verification_attempt() {
+    let (db, division_id, worker_id) = setup_tester_workflow(true);
+    let ticket_id = workflow_ticket(
+        &db,
+        division_id,
+        worker_id,
+        "Acceptance criteria\nBUREAU_DEMO_TESTER_VERDICT=FAIL",
+    );
+
+    let report = bureau::dispatch::tick(db.clone(), 4, 3).await.unwrap();
+    assert_eq!(report.workers_started, 1, "{report:?}");
+    assert_eq!(report.testers_started, 1, "{report:?}");
+
+    let conn = db.lock().unwrap();
+    let ticket = db::ticket_by_id(&conn, ticket_id).unwrap().unwrap();
+    assert_eq!(ticket.status, "queued");
+    assert_eq!(ticket.assignee_slug.as_deref(), Some("w1"));
+    assert!(
+        db::comments(&conn, ticket_id)
+            .unwrap()
+            .iter()
+            .any(|comment| comment.body.to_lowercase().contains("verification")),
+        "tester failure must leave a verification comment"
+    );
+    let attempts = db::attempts_for(&conn, ticket_id, 50).unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].kind, "verification");
+}
+
+#[tokio::test]
+async fn tester_workflow_without_tester_reaches_review() {
+    let (db, division_id, worker_id) = setup_tester_workflow(false);
+    let ticket_id = workflow_ticket(&db, division_id, worker_id, "Acceptance criteria");
+
+    let report = bureau::dispatch::tick(db.clone(), 4, 3).await.unwrap();
+    assert_eq!(report.workers_started, 1, "{report:?}");
+    assert_eq!(report.testers_started, 0, "{report:?}");
+
+    let conn = db.lock().unwrap();
+    let ticket = db::ticket_by_id(&conn, ticket_id).unwrap().unwrap();
+    assert_eq!(ticket.status, "review");
+    assert!(db::attempts_for(&conn, ticket_id, 50).unwrap().is_empty());
 }
 
 #[tokio::test]

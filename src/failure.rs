@@ -33,6 +33,8 @@ pub enum FailureKind {
     Tooling,
     /// The model answered, but not with what the contract needed (bad JSON).
     ModelOutput,
+    /// Tester's verdict on worker's work.
+    TesterVerdict,
     /// Nothing matched: a human has to look.
     Unknown,
 }
@@ -49,6 +51,7 @@ impl FailureKind {
             FailureKind::Timeout => "timeout",
             FailureKind::Tooling => "tooling",
             FailureKind::ModelOutput => "model_output",
+            FailureKind::TesterVerdict => "tester_verdict",
             FailureKind::Unknown => "unknown",
         }
     }
@@ -63,6 +66,7 @@ impl FailureKind {
             "timeout" => FailureKind::Timeout,
             "tooling" => FailureKind::Tooling,
             "model_output" => FailureKind::ModelOutput,
+            "tester_verdict" => FailureKind::TesterVerdict,
             _ => FailureKind::Unknown,
         }
     }

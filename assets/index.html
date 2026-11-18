@@ -149,6 +149,7 @@
   .col.new .col-head .t{color:#9db4ff}
   .col.review .col-head .t{color:#fcd34d}
   .col-head .n.sub{color:#94a3b8;font-size:11px;margin-left:4px}
+   .col.testing .col-head .t{color:#a78bfa}
   .col.done .col-head .t{color:#6ee7a0}
   .col.attention .col-head .t{color:#fca5a5}
   .cards{padding:8px;display:flex;flex-direction:column;gap:7px;overflow-y:auto;min-height:40px;flex:1}
@@ -261,6 +262,7 @@
   .adr-name{color:var(--mut);font-size:11px}
   .adr-role{font-family:ui-monospace,monospace;font-size:9.5px}
   .adr-role.mgr{color:#b9c6f5;border-color:#2b3550;background:#161b2a}
+  .adr-role.test{color:#86efac;border-color:#234132;background:#101d16}
   .adr-count{margin-left:auto;font-size:10px;color:#4d566b}
   .adr-head .chev{color:var(--dim);font-size:10px;transition:transform .15s}
   .adr.open .adr-head .chev{transform:rotate(180deg)}
@@ -620,6 +622,7 @@ const COLS = [
   {id:"new", label:"New", st:["new"]},
   {id:"queued", label:"Queued", st:["triaged","queued"]},
   {id:"working", label:"In progress", st:["in_progress","testing"]},
+  {id:"testing", label:"Testing", st:["testing"]},
   {id:"review", label:"Review", st:["review"]},
   {id:"done", label:"Done", st:["done"]},
   {id:"attention", label:"Blocked", st:["blocked","failed"]},
@@ -804,7 +807,7 @@ function renderRail() {
     return `<div class="agent-row" data-agent="${esc(a.slug)}" role="button" tabindex="0" title="${esc(a.role)} · ${esc(a.adapter)} · click for skills and plugins">
       <span class="st ${esc(a.status)}"></span>
       <span class="slug">${esc(a.slug)}</span>
-      <span>${esc(a.role === "manager" ? "manager" : "")}</span>
+      <span>${esc(a.role === "manager" ? "manager" : a.role === "tester" ? "tester" : "")}</span>
       <span class="ad">${esc(a.adapter)}${a.model ? " · " + esc(a.model.split(":")[0]) : ""}${a.enabled ? "" : " · off"}</span>
       ${a.plugin_profile ? `<span class="prof" title="opencode plugin profile">${esc(a.plugin_profile)}</span>` : ""}
       ${sel}
@@ -1089,6 +1092,7 @@ function renderDrawer(keep) {
         ${agents.map(a => `<option value="${esc(a.slug)}" ${a.slug===t.assignee_slug?"selected":""}>${esc(a.slug)} (${esc(a.role)})</option>`).join("")}
       </select>
     </div>
+    ${t.verdict && t.verdict !== '' ? `<div class="sec-row"><div class="sec">Verdict</div></div><div class="sec-row"><span class="pill ${t.verdict === 'PASS' ? 'ok' : 'danger'}">${t.verdict}</span> ${t.verdict_by ? `<span class="pill who">${t.verdict_by}</span>` : ''} ${t.verdict_at ? `<span class="pill">${ago(t.verdict_at)}</span>` : ''}</div><pre class="term" style="margin-top:8px;max-height:120px;overflow:auto;">${esc(t.verdict_output || '')}</pre>` : ""}
     ${attemptRows ? `<div class="sec-row"><div class="sec">Why it failed <span class="hint">· ${attempts.length} attempt${attempts.length===1?"":"s"}</span></div></div><div class="attempts">${attemptRows}</div>` : ""}
     ${t.result ? `<div class="sec-row"><div class="sec">Result</div></div>${fold(foldKey(t.ref, "result"), `<div class="result" id="dr-result">${rich(t.result)}</div>`, { lines: 8, label: "Show full result", fade: "result" })}` : ""}
     ${kids ? `<div class="sec-row"><div class="sec">Sub-tickets <span class="hint">· ${t.children.length}</span></div></div><div class="kids">${kids}</div>` : ""}
@@ -1349,7 +1353,7 @@ function agentsModal(openSlug = "") {
         <span class="st ${a.status}"></span>
         <span class="adr-slug">${esc(a.slug)}</span>
         <span class="adr-name">${esc(d.name)}</span>
-        <span class="pill adr-role ${d.role === "manager" ? "mgr" : ""}">${esc(d.role)}</span>
+        <span class="pill adr-role ${d.role === "manager" ? "mgr" : d.role === "tester" ? "test" : ""}">${esc(d.role)}</span>
         ${a.status === "running" ? `<span class="run">running</span>` : ""}
         ${d.enabled ? "" : `<span class="pill">off</span>`}
         <span class="adr-count">${ladder.length ? ladder.length + " model" + (ladder.length === 1 ? "" : "s") : "no fallback"}</span>
@@ -1358,7 +1362,7 @@ function agentsModal(openSlug = "") {
       <div class="adr-body">
         <div class="row2">
           <div class="field"><label>Name</label><input class="f-name" value="${esc(d.name)}"></div>
-          <div class="field"><label>Role</label><select class="f-role">${["worker","manager"].map(r => `<option ${r === d.role ? "selected" : ""}>${r}</option>`).join("")}</select></div>
+          <div class="field"><label>Role</label><select class="f-role">${["manager","worker","tester"].map(r => `<option ${r === d.role ? "selected" : ""}>${r}</option>`).join("")}</select></div>
         </div>
         <div class="row2">
           <div class="field"><label>Division</label><select class="f-div">${s.divisions.map(x => `<option value="${esc(x.slug)}" ${x.slug === d.division ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></div>
@@ -1411,7 +1415,7 @@ function agentsModal(openSlug = "") {
     </div>
     <div class="row2">
       <div class="field"><label>Division</label><select id="na-div">${s.divisions.map(d => `<option value="${esc(d.slug)}">${esc(d.name)}</option>`).join("")}</select></div>
-      <div class="field"><label>Role</label><select id="na-role"><option>worker</option><option>manager</option></select></div>
+      <div class="field"><label>Role</label><select id="na-role"><option>manager</option><option>worker</option><option>tester</option></select></div>
     </div>
     <div class="modal-actions"><button class="btn ghost" id="m-cancel">Close</button><button class="btn" id="na-create">Add agent</button></div>`);
   $("#modal").classList.add("wide");

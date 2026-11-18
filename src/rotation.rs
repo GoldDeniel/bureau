@@ -52,6 +52,8 @@ pub fn decide(kind: FailureKind, attempt: u32, has_next: bool) -> Action {
         FailureKind::Timeout | FailureKind::ModelOutput => Action::Park,
         // Tooling is local to the machine: another model fixes nothing.
         FailureKind::Tooling | FailureKind::Unknown => Action::Fail,
+        // Tester's verdict is a manual decision, not a model failure.
+        FailureKind::TesterVerdict => Action::Park,
     }
 }
 

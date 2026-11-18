@@ -13,6 +13,7 @@ use tokio::process::Command;
 pub enum JobKind {
     Manager,
     Worker,
+    Tester,
 }
 
 #[derive(Debug, Clone)]
@@ -22,6 +23,7 @@ pub struct JobCtx {
     pub project_path: String,
     pub ticket_ref: String,
     pub ticket_title: String,
+    pub ticket_body: String,
     /// Where to mirror the agent's stdout/stderr while it runs ("" = no file).
     pub log_path: String,
     /// This agent's skill/plugin selection; drives the child's config dir.
@@ -49,6 +51,7 @@ fn timeout_for(kind: JobKind) -> Duration {
     let (var, default) = match kind {
         JobKind::Manager => ("BUREAU_MANAGER_TIMEOUT_S", 420u64),
         JobKind::Worker => ("BUREAU_WORKER_TIMEOUT_S", 7200u64),
+        JobKind::Tester => ("BUREAU_TESTER_TIMEOUT_S", 1800u64),
     };
     let secs = std::env::var(var)
         .ok()
@@ -854,6 +857,17 @@ fn demo(agent: &Agent, ctx: &JobCtx) -> String {
             "Demo run by {} for {}.\n\nNo model was called. This ticket travelled the whole loop: \ncreate → manager triage → delegation → worker claim → result.\n\nNext step: set this agent's adapter to ollama, hermes or opencode and the same ticket will do real work.",
             agent.name, ctx.ticket_ref
         ),
+        JobKind::Tester => {
+            let verdict = if ctx.ticket_body.contains("BUREAU_DEMO_TESTER_VERDICT=FAIL") {
+                "FAIL"
+            } else {
+                "PASS"
+            };
+            format!(
+                "Demo run by {} for {}.\n\nNo model was called. This ticket travelled the whole loop: \ncreate → manager triage → delegation → worker claim → result.\n\nTESTER_VERDICT: {verdict}",
+                agent.name, ctx.ticket_ref
+            )
+        }
     }
 }
 
@@ -1128,6 +1142,7 @@ mod tests {
             project_path: "/tmp".into(),
             ticket_ref: "BUR-1".into(),
             ticket_title: "Add grass".into(),
+            ticket_body: String::new(),
             log_path: String::new(),
             toggles: AgentToggles::default(),
         };
