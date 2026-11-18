@@ -81,6 +81,86 @@ async fn send(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (St
 }
 
 #[tokio::test]
+async fn tester_role_create_and_update_succeed() {
+    let (app, db) = setup();
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/agents",
+        Some(json!({
+            "slug": "qa",
+            "name": "QA",
+            "role": "tester",
+            "division": "test",
+            "adapter": "demo"
+        })),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(body["agent"]["role"], "tester", "{body}");
+
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        "/api/agents/w1",
+        Some(json!({"role": "tester"})),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(body["agent"]["role"], "tester", "{body}");
+
+    let conn = db.lock().unwrap();
+    assert_eq!(
+        db::agent_by_slug(&conn, "qa").unwrap().unwrap().role,
+        "tester"
+    );
+    assert_eq!(
+        db::agent_by_slug(&conn, "w1").unwrap().unwrap().role,
+        "tester"
+    );
+}
+
+#[tokio::test]
+async fn tester_role_rejections_leave_agents_unchanged() {
+    let (app, db) = setup();
+    let before = {
+        let conn = db.lock().unwrap();
+        serde_json::to_value(db::agents(&conn, None).unwrap()).unwrap()
+    };
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/agents",
+        Some(json!({
+            "slug": "wizard",
+            "name": "Wizard",
+            "role": "wizard",
+            "division": "test"
+        })),
+    )
+    .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert!(body["error"].as_str().unwrap().contains("invalid role"), "{body}");
+
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        "/api/agents/w1",
+        Some(json!({"role": "unknown"})),
+    )
+    .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert!(body["error"].as_str().unwrap().contains("invalid role"), "{body}");
+
+    let conn = db.lock().unwrap();
+    let after = serde_json::to_value(db::agents(&conn, None).unwrap()).unwrap();
+    assert_eq!(after, before);
+    assert!(db::agent_by_slug(&conn, "wizard").unwrap().is_none());
+}
+
+#[tokio::test]
 async fn full_company_loop_over_http() {
     let (app, db) = setup();
 
