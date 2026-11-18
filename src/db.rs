@@ -1324,12 +1324,38 @@ pub fn set_assignee(conn: &Connection, id: i64, agent_id: Option<i64>) -> Result
     Ok(())
 }
 
+/// Return a failed verification to its worker after a short backoff. The lease
+/// keeps the same tick from retrying a deterministic failure forever.
+pub fn requeue_for_worker(
+    conn: &Connection,
+    id: i64,
+    worker_id: i64,
+) -> Result<()> {
+    let retry_at = (Utc::now() + chrono::Duration::seconds(60))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    conn.execute(
+        "UPDATE tickets SET status='queued', assignee_id=?1, lease_until=?2, updated_at=?3
+         WHERE id=?4",
+        params![worker_id, retry_at, now(), id],
+    )?;
+    Ok(())
+}
+
 pub fn set_result(conn: &Connection, id: i64, result: &str, notes: &str) -> Result<()> {
     conn.execute(
         "UPDATE tickets SET result=?1, agent_notes=?2, updated_at=?3 WHERE id=?4",
         params![result, notes, now(), id],
     )?;
     Ok(())
+}
+
+pub fn result(conn: &Connection, id: i64) -> Result<String> {
+    let row: String = conn.query_row(
+        "SELECT result FROM tickets WHERE id=?1",
+        params![id],
+        |r| r.get(0),
+    )?;
+    Ok(row)
 }
 
 pub fn set_priority(conn: &Connection, id: i64, p: i64) -> Result<()> {
@@ -1437,7 +1463,28 @@ pub fn queued_for_agent(conn: &Connection, agent_id: i64) -> Result<Option<Ticke
     // Role-guarded: a tester must never be handed queued build work.
     let sql = format!(
         "{TICKET_SELECT} WHERE t.assignee_id = ?1 AND t.status = 'queued'
+         AND (t.lease_until IS NULL OR t.lease_until <= ?2)
          AND EXISTS (SELECT 1 FROM agents a WHERE a.id = ?1 AND a.role = 'worker')
+         ORDER BY t.priority ASC, t.id ASC LIMIT 1"
+    );
+    let mut t = match conn
+        .query_row(&sql, params![agent_id, now()], map_ticket)
+        .optional()?
+    {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    t.children = children_of(conn, t.id)?;
+    Ok(Some(t))
+}
+
+/// The ticket a tester should verify next. The assignee is still the worker who
+/// built it, so the pick is division-wide: any enabled tester may claim it.
+pub fn testing_for_agent(conn: &Connection, agent_id: i64) -> Result<Option<Ticket>> {
+    let sql = format!(
+        "{TICKET_SELECT} WHERE t.status = 'testing'
+         AND t.division_id = (SELECT division_id FROM agents WHERE id = ?1)
+         AND EXISTS (SELECT 1 FROM agents a WHERE a.id = ?1 AND a.role = 'tester')
          ORDER BY t.priority ASC, t.id ASC LIMIT 1"
     );
     let mut t = match conn.query_row(&sql, [agent_id], map_ticket).optional()? {
@@ -1453,6 +1500,20 @@ pub fn idle_workers_with_work(conn: &Connection) -> Result<Vec<i64>> {
         "SELECT DISTINCT a.id FROM agents a
          JOIN tickets t ON t.assignee_id = a.id AND t.status = 'queued'
          WHERE a.enabled = 1 AND a.status = 'idle' AND a.role = 'worker'
+         ORDER BY a.id",
+    )?;
+    let out = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<i64>>>()?;
+    Ok(out)
+}
+
+pub fn idle_testers(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT a.id FROM agents a
+         JOIN tickets t ON t.status = 'testing'
+          AND t.division_id = a.division_id
+         WHERE a.enabled = 1 AND a.status = 'idle' AND a.role = 'tester'
          ORDER BY a.id",
     )?;
     let out = stmt

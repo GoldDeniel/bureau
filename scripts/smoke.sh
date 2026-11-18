@@ -284,4 +284,43 @@ json_is "board snapshot lost plugin_profile" \
   '.agents[] | select(.slug == "spark") | .plugin_profile == "smoke-profile"'
 echo "smoke: old plugin_profile field still works end to end"
 
+# ---------------------------------------------------------------- tester workflows
+# No tester yet: worker output still lands straight in review.
+REF=$($BIN --db "$DB" ticket new "Smoke: no tester" -d bureau -b "Acceptance criteria" \
+        --agent spark --json | grep -o '"ref": *"[^"]*"' | head -1 | cut -d'"' -f4)
+$BIN --db "$DB" tick --max-parallel 10 >/dev/null
+$BIN --db "$DB" ticket show "$REF" | grep -q "\[review\]" \
+  || fail "no-tester ticket did not reach review"
+echo "smoke: no-tester division still lands on review"
+
+call POST /api/agents \
+  '{"slug":"qa","name":"QA","role":"tester","division":"bureau","adapter":"demo"}'
+[ "$CODE" = 200 ] || fail "creating a tester returned $CODE: $(cat "$BODY")"
+
+# Worker success -> testing -> tester PASS -> review.
+REF=$($BIN --db "$DB" ticket new "Smoke: tester pass" -d bureau -b "Acceptance criteria" \
+        --agent spark --json | grep -o '"ref": *"[^"]*"' | head -1 | cut -d'"' -f4)
+$BIN --db "$DB" tick --max-parallel 10 >/dev/null
+$BIN --db "$DB" ticket show "$REF" | grep -q "\[review\]" \
+  || fail "tester PASS ticket did not reach review"
+$BIN --db "$DB" ticket show "$REF" | grep -q "Tester passed" \
+  || fail "tester PASS left no verification comment"
+echo "smoke: worker -> testing -> tester PASS -> review"
+
+# Worker success -> testing -> tester FAIL -> queued with a verification attempt.
+REF=$($BIN --db "$DB" ticket new "Smoke: tester fail" -d bureau \
+        -b "Acceptance criteria
+BUREAU_DEMO_TESTER_VERDICT=FAIL" --agent spark --json \
+      | grep -o '"ref": *"[^"]*"' | head -1 | cut -d'"' -f4)
+$BIN --db "$DB" tick --max-parallel 10 >/dev/null
+$BIN --db "$DB" ticket show "$REF" | grep -q "\[queued\]" \
+  || fail "tester FAIL ticket did not return to queued"
+$BIN --db "$DB" ticket show "$REF" | grep -q "Tester failed verification" \
+  || fail "tester FAIL left no verification comment"
+call GET "/api/tickets/$REF"
+[ "$CODE" = 200 ] || fail "GET tester FAIL ticket returned $CODE: $(cat "$BODY")"
+json_is "tester FAIL did not record a verification attempt" \
+  '.ticket.status == "queued" and (.attempts | length) == 1 and .attempts[0].kind == "verification"'
+echo "smoke: worker -> testing -> tester FAIL -> queued with verification attempt"
+
 echo "smoke: all checks passed ✨"

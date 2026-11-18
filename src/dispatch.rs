@@ -10,6 +10,7 @@ use std::time::Instant;
 pub struct TickReport {
     pub managers_started: usize,
     pub workers_started: usize,
+    pub testers_started: usize,
     pub recovered: usize,
     pub errors: Vec<String>,
     pub ms: u128,
@@ -23,6 +24,11 @@ enum Job {
         workers: Vec<Agent>,
     },
     Worker {
+        ticket: Ticket,
+        division: Division,
+        agent: Agent,
+    },
+    Tester {
         ticket: Ticket,
         division: Division,
         agent: Agent,
@@ -93,6 +99,7 @@ fn spawn_job(
     match &job {
         Job::Manager { .. } => report.managers_started += 1,
         Job::Worker { .. } => report.workers_started += 1,
+        Job::Tester { .. } => report.testers_started += 1,
     }
     set.spawn(async move { run_job(db, job, max_subtasks).await });
 }
@@ -138,8 +145,27 @@ fn collect_jobs(db: &Db) -> Result<Vec<Job>> {
             && let Some(ticket) = db::queued_for_agent(&conn, agent_id)?
             && !paused.contains(&ticket.division_id)
             && let Some(division) = db::division_by_id(&conn, ticket.division_id)?
+            && agent.role == "worker"
         {
             jobs.push(Job::Worker {
+                ticket,
+                division,
+                agent,
+            });
+        }
+    }
+
+    // Also collect tester jobs for verification work
+    for agent_id in db::idle_testers(&conn)? {
+        if let Some(agent) = db::agents(&conn, None)?
+            .into_iter()
+            .find(|a| a.id == agent_id)
+            && let Some(ticket) = db::testing_for_agent(&conn, agent_id)?
+            && !paused.contains(&ticket.division_id)
+            && let Some(division) = db::division_by_id(&conn, ticket.division_id)?
+            && agent.role == "tester"
+        {
+            jobs.push(Job::Tester {
                 ticket,
                 division,
                 agent,
@@ -179,6 +205,7 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
                 project_path: division.project_path.clone(),
                 ticket_ref: ticket.ref_.clone(),
                 ticket_title: ticket.title.clone(),
+                ticket_body: ticket.body.clone(),
                 log_path: log_file(&db, &ticket.ref_),
                 toggles: toggles.clone(),
             };
@@ -228,6 +255,7 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
                 project_path: division.project_path.clone(),
                 ticket_ref: ticket.ref_.clone(),
                 ticket_title: ticket.title.clone(),
+                ticket_body: ticket.body.clone(),
                 log_path: log_file(&db, &ticket.ref_),
                 toggles: toggles.clone(),
             };
@@ -243,16 +271,84 @@ async fn run_job(db: Db, job: Job, max_subtasks: usize) -> Result<()> {
                     let conn = db.lock().unwrap();
                     db::set_result(&conn, ticket.id, &output, "")?;
                     db::add_comment(&conn, ticket.id, &format!("agent:{}", agent.slug), &output)?;
-                    db::set_status(&conn, ticket.id, "review")?;
-                    db::add_event(
-                        &conn,
-                        "review",
-                        Some(ticket.id),
-                        Some(agent.id),
-                        &format!("{} finished {}", agent.slug, ticket.ref_),
-                    )?;
+                    let testers = db::testers_for(&conn, ticket.division_id)?;
+                    if testers.is_empty() {
+                        db::set_status(&conn, ticket.id, "review")?;
+                        db::add_event(
+                            &conn,
+                            "review",
+                            Some(ticket.id),
+                            Some(agent.id),
+                            &format!("{} finished {}", agent.slug, ticket.ref_),
+                        )?;
+                    } else {
+                        db::set_status(&conn, ticket.id, "testing")?;
+                        db::add_event(
+                            &conn,
+                            "testing",
+                            Some(ticket.id),
+                            Some(agent.id),
+                            &format!("{} finished; awaiting tester", agent.slug),
+                        )?;
+                    }
                     db::rollup_parent(&conn, ticket.id)?;
                     Ok(())
+                }
+                Err(failure) => handled_failure(&db, &ticket, &agent, failure).await,
+            }
+        }
+        Job::Tester {
+            ticket,
+            division,
+            agent,
+        } => {
+            let toggles = {
+                let conn = db.lock().unwrap();
+                if !db::try_start_agent(&conn, agent.id)? {
+                    return Ok(());
+                }
+                if !db::claim(&conn, ticket.id, agent.id, 3600)? {
+                    db::set_agent_status(&conn, agent.id, "idle")?;
+                    return Ok(());
+                }
+                db::add_event(
+                    &conn,
+                    "claim",
+                    Some(ticket.id),
+                    Some(agent.id),
+                    &format!("{} started {}", agent.slug, ticket.ref_),
+                )?;
+                db::agent_toggles(&conn, &agent.slug)?
+            };
+
+            // Get worker's result and agent notes
+            let agent_notes = {
+                let conn = db.lock().unwrap();
+                db::result(&conn, ticket.id)?
+            };
+
+            let prompt = tester_prompt(&ticket, &division, &agent, &agent_notes, &agent_notes);
+            let ctx = JobCtx {
+                kind: JobKind::Tester,
+                workers: Vec::new(),
+                project_path: division.project_path.clone(),
+                ticket_ref: ticket.ref_.clone(),
+                ticket_title: ticket.title.clone(),
+                ticket_body: ticket.body.clone(),
+                log_path: log_file(&db, &ticket.ref_),
+                toggles: toggles.clone(),
+            };
+            let result = run_with_ladder(&db, &ticket, &agent, &prompt, &ctx, &toggles).await;
+
+            {
+                let conn = db.lock().unwrap();
+                db::set_agent_status(&conn, agent.id, "idle")?;
+            }
+
+            match result {
+                Ok(output) => {
+                    let verdict = parse_verdict(&output);
+                    handle_tester_verdict(&db, &ticket, &agent, verdict).await
                 }
                 Err(failure) => handled_failure(&db, &ticket, &agent, failure).await,
             }
@@ -653,6 +749,222 @@ fn one_line(s: &str, n: usize) -> String {
     } else {
         flat.chars().take(n).collect::<String>() + "…"
     }
+}
+
+fn tester_prompt(
+    ticket: &Ticket,
+    division: &Division,
+    agent: &Agent,
+    _worker_output: &str,
+    agent_notes: &str,
+) -> String {
+    let diff_summary = format!(
+        "```\ngit status --porcelain:\n{}\ngit log --oneline -5:\n{}",
+        get_git_status(&division.project_path),
+        get_git_log(&division.project_path)
+    );
+
+    format!(
+        r#"You are {aname} ({aslug}), a tester in the "{dname}" division of Bureau.
+Working directory: {path}
+Division charter: {charter}
+
+You own ticket {tref} — "{title}". Priority P{prio}.
+This is a sub-ticket of {parent}; stay inside its scope.
+
+## Acceptance Criteria
+{body}
+
+## Worker's Result
+{agent_notes}
+
+## Changes Made
+{diff_summary}
+
+## Verification Commands
+You must run the verification commands yourself and not trust the worker's claim of passing tests.
+
+Finish with a machine-readable verdict:
+TESTER_VERDICT: PASS
+or
+TESTER_VERDICT: FAIL
+followed by the pasted command output.
+
+Be thorough: run the tests, check documentation, and verify the implementation matches the acceptance criteria.
+"#,
+        aname = agent.name,
+        aslug = agent.slug,
+        dname = division.name,
+        path = if division.project_path.is_empty() {
+            "(none)"
+        } else {
+            &division.project_path
+        },
+        charter = if division.description.is_empty() {
+            "(none)"
+        } else {
+            &division.description
+        },
+        tref = ticket.ref_,
+        title = ticket.title,
+        prio = ticket.priority,
+        parent = match &ticket.parent_ref {
+            Some(p) => format!("This is a sub-ticket of {p}; stay inside its scope."),
+            None => String::new(),
+        },
+        body = if ticket.body.is_empty() {
+            "(no description)"
+        } else {
+            &ticket.body
+        },
+        agent_notes = agent_notes,
+        diff_summary = &diff_summary,
+    )
+}
+
+fn get_git_status(project_path: &str) -> String {
+    match std::process::Command::new("git").args(["status", "--porcelain"]).current_dir(project_path).output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        Err(_) => "(git command failed)".to_string(),
+    }
+}
+
+fn get_git_log(project_path: &str) -> String {
+    match std::process::Command::new("git").args(["log", "--oneline", "-5"]).current_dir(project_path).output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        Err(_) => "(git command failed)".to_string(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum Verdict {
+    Pass,
+    Fail(String),
+    Tooling(failure::FailureKind),
+}
+
+fn parse_verdict(raw: &str) -> Verdict {
+    let mut last_verdict_line: Option<&str> = None;
+    let mut last_verdict_pos = 0;
+
+    for (_, line) in raw.lines().enumerate() {
+        let line_lower = line.to_lowercase();
+        if line_lower.contains("tester_verdict:") {
+            let colon_pos = line.find(':').unwrap_or(0);
+            let verdict_part = if colon_pos > 0 {
+                line[colon_pos + 1..].trim()
+            } else {
+                line
+            };
+
+            let verdict_lower = verdict_part.to_lowercase();
+            if verdict_lower.contains("pass") {
+                let _output = raw[last_verdict_pos..].trim();
+                return Verdict::Pass;
+            } else if verdict_lower.contains("fail") {
+                let _output = raw[last_verdict_pos..].trim();
+                return Verdict::Fail(_output.to_string());
+            } else {
+                last_verdict_line = Some(line);
+                last_verdict_pos = line.as_ptr() as usize - raw.as_ptr() as usize + line.len();
+            }
+        }
+    }
+
+    if let Some(line) = last_verdict_line {
+        let classified = failure::classify(line, None);
+        return Verdict::Tooling(classified.kind);
+    }
+
+    let classified = failure::classify(raw, None);
+    Verdict::Tooling(classified.kind)
+}
+
+async fn handle_tester_verdict(
+    db: &Db,
+    ticket: &Ticket,
+    agent: &Agent,
+    verdict: Verdict,
+) -> Result<()> {
+    let conn = db.lock().unwrap();
+
+    match verdict {
+        Verdict::Pass => {
+            // The tester claimed the ticket, so hand it back to the worker the
+            // reviewer expects to see on the card.
+            db::set_assignee(&conn, ticket.id, ticket.assignee_id)?;
+            db::set_status(&conn, ticket.id, "review")?;
+            db::add_comment(
+                &conn,
+                ticket.id,
+                &format!("agent:{}", agent.slug),
+                "Tester passed the verification.",
+            )?;
+            db::add_event(
+                &conn,
+                "test_pass",
+                Some(ticket.id),
+                Some(agent.id),
+                "Tester passed verification",
+            )?;
+        }
+        Verdict::Fail(output) => {
+            db::add_comment(
+                &conn,
+                ticket.id,
+                &format!("agent:{}", agent.slug),
+                &format!("Tester failed verification:\n\n{}", output),
+            )?;
+            db::record_attempt(
+                &conn,
+                ticket.id,
+                agent,
+                "tester",
+                "verification",
+                "Tester failed verification",
+                &output,
+            )?;
+            if let Some(worker_id) = ticket.assignee_id {
+                db::requeue_for_worker(&conn, ticket.id, worker_id)?;
+            } else {
+                db::set_status(&conn, ticket.id, "new")?;
+            }
+            db::add_event(
+                &conn,
+                "test_fail",
+                Some(ticket.id),
+                Some(agent.id),
+                "Tester failed verification",
+            )?;
+        }
+        Verdict::Tooling(kind) => {
+            db::record_attempt(
+                &conn,
+                ticket.id,
+                agent,
+                "tester",
+                "verification",
+                "Tester verdict parsing failed",
+                &format!("Tooling failure: {:?}", kind),
+            )?;
+            // On tooling failure, requeue for retry
+            if let Some(worker_id) = ticket.assignee_id {
+                db::requeue_for_worker(&conn, ticket.id, worker_id)?;
+            } else {
+                db::set_status(&conn, ticket.id, "new")?;
+            }
+            db::add_event(
+                &conn,
+                "test_tooling",
+                Some(ticket.id),
+                Some(agent.id),
+                "Tester verdict parsing failed",
+            )?;
+        }
+    }
+
+    db::rollup_parent(&conn, ticket.id)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------- plan handling
