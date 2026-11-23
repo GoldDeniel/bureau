@@ -2,6 +2,8 @@
 use crate::db::{self, AgentPatch, Db, STATUSES};
 use crate::dispatch;
 use crate::live;
+use crate::provider_fetch;
+use crate::providers;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -55,6 +57,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tickets/{key}/assign", post(assign_ticket))
         .route("/api/tickets/{key}/claim", post(claim_ticket))
         .route("/api/events", get(list_events))
+        .route("/api/providers", get(list_providers).post(create_provider))
+        .route(
+            "/api/providers/{slug}",
+            patch(update_provider).delete(delete_provider),
+        )
+        .route("/api/providers/{slug}/key", post(set_provider_key))
+        .route("/api/providers/{slug}/refresh", post(refresh_provider))
         .route("/api/dispatch", get(dispatch_status))
         .route("/api/dispatch/tick", post(run_tick))
         .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))) })
@@ -325,6 +334,158 @@ fn set_paused(st: &AppState, slug: &str, paused: bool) -> Result<Json<Value>, Ap
     Ok(Json(json!({ "division": division })))
 }
 
+// ---------------------------------------------------------------- providers
+
+/// Every provider the model picker is fed from. Never includes a key: the
+/// response carries `key_state` (`none`/`missing`/`set`) and nothing else about
+/// the credential.
+async fn list_providers(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let conn = st.db.lock().unwrap();
+    Ok(Json(json!({ "providers": providers::list(&conn)? })))
+}
+
+async fn create_provider(
+    State(st): State<AppState>,
+    Json(input): Json<providers::ProviderInput>,
+) -> Result<Json<Value>, ApiError> {
+    if input.slug.trim().is_empty() {
+        return Err(ApiError::from(anyhow::anyhow!("a provider needs a slug")));
+    }
+    let created = {
+        let conn = st.db.lock().unwrap();
+        providers::create(&conn, &input)?
+    };
+    // Populate the model list right away so the dropdown is usable without a
+    // second action. A provider that cannot be reached is still created: the
+    // error is reported, the row is kept.
+    let (fetched, error) = refresh_provider_models(&st, &created.slug).await;
+    Ok(Json(json!({
+        "provider": fetched.unwrap_or(created),
+        "refresh_error": error,
+    })))
+}
+
+async fn update_provider(
+    State(st): State<AppState>,
+    Path(slug): Path<String>,
+    Json(input): Json<providers::ProviderUpdate>,
+) -> Result<Json<Value>, ApiError> {
+    {
+        let conn = st.db.lock().unwrap();
+        let Some(existing) = providers::get(&conn, &slug)? else {
+            return Err(ApiError::from(anyhow::anyhow!("provider not found: {slug}")));
+        };
+        if let Some(kind) = input.kind.as_deref()
+            && providers::ProviderKind::parse(kind).is_err()
+        {
+            return Err(ApiError::from(anyhow::anyhow!("unknown provider kind: {kind}")));
+        }
+        // Replace the key only when the caller actually sent one; an absent field
+        // must not silently wipe a stored credential.
+        if let Some(key) = input.api_key.as_deref() {
+            providers::set_key(&conn, &slug, Some(key))?;
+        }
+        conn.execute(
+            "UPDATE providers SET name=?1, kind=?2, base_url=?3, adapter=?4, label=?5, enabled=?6 \
+             WHERE slug=?7",
+            rusqlite::params![
+                input.name.as_deref().unwrap_or(&existing.name).trim(),
+                input.kind.as_deref().unwrap_or(&existing.kind),
+                input.base_url.as_deref().unwrap_or(&existing.base_url).trim(),
+                input.adapter.as_deref().unwrap_or(&existing.adapter).trim(),
+                input.label.as_deref().unwrap_or(&existing.label).trim(),
+                input.enabled.unwrap_or(existing.enabled) as i64,
+                slug
+            ],
+        )?;
+    }
+    let (fetched, error) = refresh_provider_models(&st, &slug).await;
+    Ok(Json(json!({ "provider": fetched, "refresh_error": error })))
+}
+
+async fn set_provider_key(
+    State(st): State<AppState>,
+    Path(slug): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let key = body.get("api_key").and_then(|v| v.as_str());
+    {
+        let conn = st.db.lock().unwrap();
+        if providers::get(&conn, &slug)?.is_none() {
+            return Err(ApiError::from(anyhow::anyhow!("provider not found: {slug}")));
+        }
+        // An empty string clears the key; a non-empty value replaces it.
+        providers::set_key(&conn, &slug, key.filter(|k| !k.trim().is_empty()))?;
+    }
+    let conn = st.db.lock().unwrap();
+    Ok(Json(json!({ "provider": providers::get(&conn, &slug)? })))
+}
+
+async fn delete_provider(
+    State(st): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = st.db.lock().unwrap();
+    // Refuses while an agent ladder references the slug, and names the agents.
+    providers::delete(&conn, &slug)?;
+    Ok(Json(json!({ "deleted": slug })))
+}
+
+/// Fetch a provider's models live and cache them. A failed fetch keeps the
+/// previous cache and reports why, rather than blanking a working dropdown.
+async fn refresh_provider(State(st): State<AppState>, Path(slug): Path<String>) -> Result<Json<Value>, ApiError> {
+    let (provider, error) = refresh_provider_models(&st, &slug).await;
+    match provider {
+        Some(p) => Ok(Json(json!({ "provider": p, "refresh_error": error }))),
+        None => Err(ApiError::from(anyhow::anyhow!("provider not found: {slug}"))),
+    }
+}
+
+/// Shared refresh used by create, update and the explicit refresh button.
+async fn refresh_provider_models(
+    st: &AppState,
+    slug: &str,
+) -> (Option<providers::Provider>, Option<String>) {
+    let (provider, key) = {
+        let conn = st.db.lock().unwrap();
+        let Ok(Some(p)) = providers::get(&conn, slug) else {
+            return (None, Some(format!("provider not found: {slug}")));
+        };
+        if !p.enabled {
+            return (Some(p), None);
+        }
+        let key = match providers::plaintext_key(&conn, slug) {
+            Ok(k) => k,
+            Err(e) => return (Some(p), Some(format!("{e:#}"))),
+        };
+        (p, key)
+    };
+
+    let p = provider.clone();
+    let key_for_task = key.clone();
+    let fetched = tokio::task::spawn_blocking(move || {
+        provider_fetch::fetch_models(&p, key_for_task.as_deref())
+    })
+    .await;
+
+    let result = match fetched {
+        Ok(Ok(models)) => {
+            let conn = st.db.lock().unwrap();
+            if let Err(e) = providers::store_models(&conn, slug, &models) {
+                Err(anyhow::anyhow!("{e:#}"))
+            } else {
+                Ok(())
+            }
+        }
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(anyhow::anyhow!("model fetch panicked: {e}")),
+    };
+
+    let conn = st.db.lock().unwrap();
+    let out = providers::get(&conn, slug).ok().flatten();
+    (out, result.err().map(|e| format!("{e:#}")))
+}
+
 // ---------------------------------------------------------------- agents
 
 async fn list_agents(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -436,16 +597,13 @@ async fn put_agent_models(
         .models
         .iter()
         .map(|r| {
-            // A rung without a provider inherits the model spec's own prefix, so
-            // the board does not have to repeat it.
-            let provider = if r.provider.trim().is_empty() {
-                match r.model.split_once('/') {
-                    Some((p, _)) => p.to_string(),
-                    None => "local".to_string(),
-                }
-            } else {
-                r.provider.clone()
-            };
+            // ALWAYS derive the provider from the model spec. A caller-supplied
+            // provider is not trusted: the dispatcher derives it via
+            // rotation::provider_of, so trusting a stored value here would let the
+            // column disagree with the value rotation actually uses. The old
+            // "keep what was sent" branch is what let a stale/wrong provider
+            // survive a ladder save.
+            let provider = crate::rotation::provider_of(&r.model).to_string();
             (provider, r.model.clone(), r.adapter.clone())
         })
         .collect();

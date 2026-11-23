@@ -685,8 +685,16 @@ async fn agent_ladder_round_trips_and_labels_its_provider() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let models = body["models"].as_array().expect("models array");
     assert_eq!(models.len(), 2);
+    // The provider is always derived from the model spec, never trusted from the
+    // caller. `rotation::provider_of` is what the dispatcher rotates on, so a
+    // stored provider that disagreed with it would be a rotation bug: the rung
+    // would cool down one provider while the run failed on another.
     assert_eq!(models[0]["provider"], "nvidia");
-    assert_eq!(models[1]["provider"], "openrouter");
+    assert_eq!(models[1]["provider"], "deepseek");
+    assert_ne!(
+        models[1]["provider"], "openrouter",
+        "a caller-supplied provider must not override the model's own prefix"
+    );
     // Position is the order they will be tried in.
     assert_eq!(models[0]["position"], 0);
     assert_eq!(models[1]["position"], 1);

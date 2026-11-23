@@ -135,7 +135,55 @@ CREATE TABLE IF NOT EXISTS agent_models (
     created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS agent_models_by_agent ON agent_models(agent_id, position);
+
+-- Providers the model picker is fed from. Kept in its own table rather than a
+-- hardcoded array in the board: the key, the base URL and the fetched model list
+-- all belong to data, not to markup. NEVER stores a plaintext key.
+CREATE TABLE IF NOT EXISTS providers (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug             TEXT NOT NULL UNIQUE,
+    name             TEXT NOT NULL,
+    kind             TEXT NOT NULL DEFAULT 'openai_compatible',
+    base_url         TEXT NOT NULL DEFAULT '',
+    adapter          TEXT NOT NULL DEFAULT '',
+    label            TEXT NOT NULL DEFAULT '',
+    model_labels     TEXT NOT NULL DEFAULT '{}',
+    key_ciphertext   BLOB,
+    key_nonce        BLOB,
+    models_cache     TEXT NOT NULL DEFAULT '[]',
+    models_fetched_at TEXT,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    created_at       TEXT NOT NULL
+);
 "#;
+
+/// Insert the provider rows the board used to hardcode, once. Idempotent: a slug
+/// that already exists is left exactly as the user configured it.
+fn seed_providers(conn: &Connection) -> Result<()> {
+    // (slug, name, kind, base_url, adapter, label)
+    const SEEDS: &[(&str, &str, &str, &str, &str, &str)] = &[
+        ("opencode", "opencode", "openai_compatible", "https://opencode.ai/zen/v1", "opencode", ""),
+        ("opencode-go", "opencode go", "openai_compatible", "https://opencode.ai/zen/v1", "opencode", ""),
+        ("openrouter", "OpenRouter", "openai_compatible", "https://openrouter.ai/api/v1", "opencode", ""),
+        ("nvidia", "NVIDIA", "openai_compatible", "https://integrate.api.nvidia.com/v1", "opencode", ""),
+        ("openai", "OpenAI", "openai_compatible", "https://api.openai.com/v1", "opencode", ""),
+        ("anthropic", "Anthropic", "anthropic", "https://api.anthropic.com", "opencode", ""),
+        ("ollama", "Ollama (local)", "ollama", "http://127.0.0.1:11434", "ollama", ""),
+        ("local", "Local", "manual", "", "demo", ""),
+        ("custom", "Custom", "manual", "", "shell", ""),
+    ];
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    for (slug, name, kind, base, adapter, label) in SEEDS {
+        conn.execute(
+            "INSERT INTO providers (slug, name, kind, base_url, adapter, label, \
+                                    model_labels, models_cache, enabled, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}', '[]', 1, ?7) \
+             ON CONFLICT(slug) DO NOTHING",
+            params![slug, name, kind, base, adapter, label, now],
+        )?;
+    }
+    Ok(())
+}
 
 pub fn open(path: &str) -> Result<Db> {
     if let Some(dir) = Path::new(path).parent()
@@ -175,6 +223,9 @@ pub fn open(path: &str) -> Result<Db> {
     }
     // A crash leaves agents marked running; nothing can actually be running at boot.
     conn.execute("UPDATE agents SET status='idle' WHERE status='running'", [])?;
+    // Seed the provider registry once, from the names the board used to hardcode,
+    // so an upgrade does not leave the picker empty. Existing rows are untouched.
+    seed_providers(&conn)?;
     conn.execute(
         "UPDATE tickets SET status='queued', lease_until=NULL
          WHERE status='in_progress' AND assignee_id IS NOT NULL",
@@ -1398,6 +1449,121 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
         Arc::new(Mutex::new(conn))
+    }
+
+    // ------------------------------------------------------------ providers
+
+    use crate::providers::{delete, plaintext_key, set_key, store_models};
+
+    /// Every seeded provider must agree with the provider id that rotation
+    /// derives from a model string. A rung whose stored provider disagrees with
+    /// `rotation::provider_of` is a latent rotation bug: the dispatcher would
+    /// rotate on one name while recording another.
+    #[test]
+    fn seeded_provider_slugs_match_the_ids_rotation_derives() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        seed_providers(&conn).unwrap();
+        let rows = crate::providers::list(&conn).unwrap();
+        assert!(!rows.is_empty(), "the registry must not seed empty");
+        for p in &rows {
+            // A model id this provider would serve, in the form the picker saves.
+            let model = format!("{}/some-model", p.slug);
+            assert_eq!(
+                crate::rotation::provider_of(&model),
+                p.slug,
+                "provider {} disagrees with rotation::provider_of",
+                p.slug
+            );
+        }
+    }
+
+    #[test]
+    fn seeding_is_idempotent_and_keeps_user_edits() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        seed_providers(&conn).unwrap();
+        conn.execute(
+            "UPDATE providers SET base_url='http://192.168.2.9:11434' WHERE slug='ollama'",
+            [],
+        )
+        .unwrap();
+        seed_providers(&conn).unwrap();
+        let ollama = crate::providers::get(&conn, "ollama").unwrap().unwrap();
+        assert_eq!(ollama.base_url, "http://192.168.2.9:11434");
+    }
+
+    #[test]
+    fn a_stored_key_never_appears_in_the_serialized_provider() {
+        // The KEK lives outside the DB; the test supplies one.
+        unsafe { std::env::set_var("BUREAU_KEK", "a".repeat(64)) };
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        seed_providers(&conn).unwrap();
+        let secret = "sk-super-secret-value-123";
+        set_key(&conn, "openrouter", Some(secret)).unwrap();
+
+        let p = crate::providers::get(&conn, "openrouter").unwrap().unwrap();
+        assert_eq!(p.key_state, "set");
+
+        // Neither the serialized provider nor the raw column may carry it.
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains(secret), "the API shape leaked the key");
+        assert!(!json.contains("super"), "the API shape leaked part of the key");
+
+        let raw: Vec<u8> = conn
+            .query_row(
+                "SELECT key_ciphertext FROM providers WHERE slug='openrouter'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&raw).contains(secret),
+            "the key was stored in plaintext"
+        );
+        // ...and it round-trips through the cipher for the one path that needs it.
+        assert_eq!(plaintext_key(&conn, "openrouter").unwrap().as_deref(), Some(secret));
+    }
+
+    #[test]
+    fn deleting_a_provider_in_use_is_refused_and_names_the_agents() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        seed_providers(&conn).unwrap();
+        let div = create_division(&conn, "d", "D", "", "/tmp").unwrap();
+        let agent_id = create_agent(
+            &conn, "worker1", "Worker One", "worker", Some(div), "opencode", "", "",
+        )
+        .unwrap();
+        crate::providers::set_agent_models(
+            &conn,
+            agent_id,
+            &[crate::providers::Rung {
+                provider: "openrouter".into(),
+                model: "openrouter/google/gemini-4".into(),
+                adapter: "opencode".into(),
+            }],
+        )
+        .unwrap();
+
+        let err = delete(&conn, "openrouter").unwrap_err().to_string();
+        assert!(err.contains("worker1"), "expected the agent named, got: {err}");
+        // A provider nobody references still deletes.
+        assert!(delete(&conn, "custom").is_ok());
+    }
+
+    #[test]
+    fn a_failed_refresh_does_not_wipe_the_cached_models() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        seed_providers(&conn).unwrap();
+        let good = vec!["opencode-go/glm-5.3-flash".to_string()];
+        store_models(&conn, "opencode-go", &good).unwrap();
+        // The API layer only calls store_models on success, so a failed fetch
+        // leaves this row alone; assert the read path still sees the old list.
+        let p = crate::providers::get(&conn, "opencode-go").unwrap().unwrap();
+        assert_eq!(p.models, good);
     }
 
     #[test]

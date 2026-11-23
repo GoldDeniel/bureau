@@ -5,5 +5,7 @@ pub mod db;
 pub mod dispatch;
 pub mod failure;
 pub mod live;
+pub mod provider_fetch;
+pub mod providers;
 pub mod rotation;
 pub mod seed;

@@ -318,10 +318,66 @@
   .mgroup-head{display:flex;align-items:center;gap:7px;margin-bottom:5px}
   .mgroup-head .prov{font-family:ui-monospace,monospace;font-size:10.5px;color:#9fb0d8;letter-spacing:.03em}
   .mgroup-head .n{font-size:9.5px;color:#4d566b;border:1px solid var(--line);border-radius:5px;padding:0 5px}
-  .mrow{display:grid;grid-template-columns:130px 1fr 110px auto auto;gap:6px;align-items:center;margin-top:5px}
+  .mrow{display:grid;grid-template-columns:1fr auto 110px auto auto;gap:6px;align-items:center;margin-top:5px}
   .mrow select,.mrow input{background:#141824;border:1px solid var(--line);border-radius:6px;
     padding:3px 6px;font-size:11px;color:var(--txt);outline:none;font-family:inherit;width:100%}
   .mrow input{font-family:ui-monospace,monospace}
+  /* the model chip: the whole rung is one button that opens the picker */
+  .rung-pick{display:flex;align-items:baseline;gap:6px;text-align:left;width:100%;
+    background:#141824;border:1px solid var(--line);border-radius:6px;padding:5px 8px;
+    color:var(--txt);font:inherit;font-size:11px;cursor:pointer;overflow:hidden}
+  .rung-pick:hover{border-color:#33405c;background:#171d2b}
+  .rung-pick .rc-prov{font-size:10px;color:#9fb0d8;letter-spacing:.02em;flex:none}
+  .rung-pick .rc-sep{color:#3f4759;flex:none}
+  .rung-pick .rc-model{font-family:ui-monospace,monospace;font-size:11px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .rung-pick .rc-id{margin-left:auto;font-size:9.5px;color:#4d566b;
+    font-family:ui-monospace,monospace;flex:none}
+  .rung-pick .rc-empty{color:#5b6478;font-style:italic}
+  .rung-tag{font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#7ee2b8;
+    border:1px solid #1d3d33;background:#0f1f1a;border-radius:5px;padding:1px 5px;white-space:nowrap}
+  .rung-tag.alt{color:#8fa3c8;border-color:#233047;background:#111823}
+  /* the searchable provider·model picker, expanded in place under its rung */
+  .pk{margin:6px 0 2px;background:#0d1119;border:1px solid #26314a;border-radius:8px;padding:8px;
+    display:flex;flex-direction:column;gap:7px}
+  .pk-q{background:#141824;border:1px solid var(--line);border-radius:6px;padding:5px 8px;
+    font-size:11px;color:var(--txt);outline:none;width:100%;font-family:inherit}
+  .pk-q:focus{border-color:#3d4d70}
+  .pk-list{max-height:230px;overflow-y:auto;display:flex;flex-direction:column;gap:6px}
+  .pk-group{display:flex;flex-direction:column;gap:2px}
+  .pk-head{display:flex;gap:6px;align-items:center;font-size:9.5px;letter-spacing:.1em;
+    text-transform:uppercase;color:#5f6b85;padding:3px 4px}
+  .pk-head .pk-n{color:#3f4759;border:1px solid var(--line);border-radius:4px;padding:0 4px}
+  .pk-row{display:flex;align-items:baseline;gap:8px;text-align:left;width:100%;cursor:pointer;
+    background:transparent;border:1px solid transparent;border-radius:6px;padding:4px 7px;
+    color:var(--txt);font:inherit;font-size:11px}
+  .pk-row:hover,.pk-row:focus{background:#161c29;border-color:#2a3550;outline:none}
+  .pk-row .pk-model{font-family:ui-monospace,monospace;font-size:11px}
+  .pk-row .pk-id{margin-left:auto;font-size:9.5px;color:#4d566b;
+    font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pk-custom{border-top:1px solid var(--line);border-radius:0;margin-top:2px;padding-top:6px}
+  .pk-custom .pk-model{color:#8fa3c8;font-style:italic}
+  .pk-foot{display:flex;justify-content:flex-end}
+  /* provider settings rows */
+  .provlist{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+  .prov-row{background:#0f131b;border:1px solid var(--line);border-radius:9px;padding:8px 10px;
+    display:flex;flex-direction:column;gap:5px}
+  .prov-main{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+  .prov-name{font-size:12px;color:#dfe6f5;font-weight:600}
+  .prov-slug,.prov-kind{font-family:ui-monospace,monospace;font-size:9.5px;color:#4d566b}
+  .prov-key{margin-left:auto;font-size:9.5px;border:1px solid var(--line);border-radius:5px;
+    padding:1px 6px;color:#8fa3c8;background:#111823;white-space:nowrap}
+  .prov-key.set{color:#7ee2b8;border-color:#1d3d33;background:#0f1f1a}
+  .prov-key.missing{color:#fdba74;border-color:#4a3320;background:#1f170f}
+  .prov-sub{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;
+    font-family:ui-monospace,monospace;font-size:9.5px;color:#4d566b}
+  .prov-sub .prov-n{color:#8fa3c8}
+  .prov-acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+  .prov-keyrow{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:4px}
+  .prov-keyrow[hidden]{display:none}
+  .prov-keyrow .p-keyin{flex:1 1 220px;min-width:160px;background:#141824;border:1px solid var(--line);
+    border-radius:6px;padding:4px 7px;font-size:11px;color:var(--txt);outline:none;font-family:inherit}
+  .prov-hint{font-size:9.5px;color:#4d566b}
   .pill.cooling{color:#93c5fd;border-color:#243a5c;background:#101a2b;font-size:9px}
   /* failure-kind filter: the board's "why", as a row of counts */
   .failbar{display:none;flex-wrap:wrap;gap:6px;padding:0 18px 8px;align-items:center}
@@ -445,6 +501,7 @@
 <div class="app">
   <aside class="rail">
     <div class="brand"><span class="mark">◈</span> Bureau <span class="ver" id="ver">v0</span></div>
+    <button class="btn ghost" id="btn-settings" title="Providers and their API keys">⚙ Settings</button>
     <button class="btn primary" id="btn-new">+ New ticket</button>
 
     <div class="rail-label"><span>Divisions</span><button id="btn-add-div" title="Add division">+</button></div>
@@ -662,6 +719,14 @@ async function load() {
       renderLive(snap.live || []);   // chips and timers stay live without a full repaint
     }
     if (S.openRef) refreshDrawer(true);
+    // Providers are not part of the snapshot: they change only when the user
+    // edits them, so fetch alongside and keep them on S for the picker.
+    if (!S.providers) {
+      try {
+        const pr = await api("/api/providers");
+        S.providers = pr.providers || [];
+      } catch (e) { S.providers = []; }
+    }
   } catch (e) {
     $("#foot-stats").textContent = "offline";
   }
@@ -1196,6 +1261,12 @@ function agentsModal(openSlug = "") {
       provider: m.provider || "", model: m.model || "", adapter: m.adapter || "",
       cooldown_until: m.cooldown_until || null,
     }));
+    // The primary used to be a separate free-text field. Fold it into rung 0 so
+    // every model this agent runs is edited by the same control.
+    if (!ladder.length && a.model) {
+      ladder.push({ provider: a.adapter === "ollama" ? "ollama" : (a.model.split("/")[0] || ""),
+                    model: a.model, adapter: "", cooldown_until: null });
+    }
     draft.set(a.slug, {
       name: a.name, role: a.role, division: a.division_slug || "",
       adapter: a.adapter, model: a.model, enabled: a.enabled,
@@ -1206,20 +1277,117 @@ function agentsModal(openSlug = "") {
 
   const open = new Set(openSlug ? [openSlug] : []);
 
-  const modelRow = (slug, i, m) => `
+  // ---- the model picker ------------------------------------------------
+  // One control for every rung, primary included. A rung is a
+  // {provider, model, adapter} triple; the picker chooses it from the
+  // provider registry's fetched lists, so nobody types "provider/model" by
+  // hand unless they deliberately choose the custom-id escape hatch.
+  const flatModels = () => {
+    const out = [];
+    (S.providers || []).forEach(p => {
+      if (p.enabled === false) return;
+      (p.models || []).forEach(m => out.push({
+        provider: p.slug,
+        model: m.includes("/") ? m : `${p.slug}/${m}`,
+        // The id exactly as the provider returned it. Some providers (OpenRouter,
+        // Ollama) list bare ids with no provider prefix, and a model like
+        // "z-ai/glm-4.5" must NOT be qualified into "z-ai/z-ai/glm-4.5" — the
+        // provider is already known from the row this came from.
+        raw: m,
+        adapter: p.adapter || "",
+        label: p.label || p.name || p.slug,
+        modelLabel: (p.model_labels && p.model_labels[m]) || "",
+        group: p.name || p.slug,
+        keyState: p.key_state,
+      }));
+    });
+    return out;
+  };
+
+  /// The model string a rung should store for a picked entry.
+  ///
+  /// `rotation::provider_of` splits on the FIRST '/', so the stored id must lead
+  /// with the provider slug for rotation to derive the right name. But OpenRouter
+  /// and Ollama serve ids that already contain a vendor prefix ("z-ai/glm-4.5",
+  /// "huihui_ai/qwen...:7b"), which would be misread as the provider. So: prefix
+  /// the provider only when the id does not already lead with something that
+  /// looks like this provider.
+  const storedModelId = (x) => {
+    if (!x.provider) return x.raw;
+    if (x.raw === x.provider || x.raw.startsWith(x.provider + "/")) return x.raw;
+    return `${x.provider}/${x.raw}`;
+  };
+
+
+  /// The chip a rung shows: "label · model" with the raw id underneath.
+  const rungChip = (m) => {
+    if (!m.model) return `<span class="rc-empty">no model chosen</span>`;
+    const known = flatModels().find(x => x.model === m.model);
+    const prov = m.provider || (m.model.includes("/") ? m.model.split("/")[0] : "");
+    const id = m.model.includes("/") ? m.model.split("/").slice(1).join("/") : m.model;
+    const title = known ? (known.modelLabel || id) : id;
+    return `<span class="rc-prov">${esc(known ? known.label : prov)}</span>` +
+           `<span class="rc-sep">·</span>` +
+           `<span class="rc-model">${esc(title)}</span>` +
+           `${known && known.modelLabel ? `<span class="rc-id">${esc(m.model)}</span>` : ""}`;
+  };
+
+  const modelRow = (slug, i, m, isPrimary) => `
     <div class="mrow" data-i="${i}">
-      <select class="m-prov" title="Provider">
-        ${["", "opencode", "nvidia", "openrouter", "anthropic", "openai", "ollama", "local", "custom"]
-          .map(x => `<option value="${esc(x)}" ${x === m.provider ? "selected" : ""}>${esc(x || "— provider —")}</option>`).join("")}
-      </select>
-      <input class="m-name" value="${esc(m.model)}" placeholder="model id (provider/model)">
+      <button class="rung-pick" data-slug="${esc(slug)}" data-i="${i}" title="Choose the model">
+        ${rungChip(m)}
+      </button>
+      ${isPrimary
+        ? `<span class="rung-tag">primary</span>`
+        : `<span class="rung-tag alt">fallback ${i}</span>`}
       <select class="m-ad" title="Adapter for this rung">
         <option value="">inherit</option>
         ${s.adapters.map(x => `<option ${x === m.adapter ? "selected" : ""}>${x}</option>`).join("")}
       </select>
       ${m.cooldown_until ? `<span class="pill cooling" title="cooling down until ${esc(m.cooldown_until)}">cooling</span>` : ""}
-      <button class="btn ghost danger m-del" title="Remove">×</button>
-    </div>`;
+      ${isPrimary ? "" : `<button class="btn ghost danger m-del" title="Remove">×</button>`}
+      </div>
+      ${pickerOpen.slug === slug && pickerOpen.i === i ? pickerHtml(slug, i) : ""}`;
+
+  /// The searchable picker overlay. Lives inside the drawer (expands in place,
+  /// no second window) and filters on provider + model substring.
+  const pickerOpen = { slug: null, i: null, query: "" };
+
+  const pickerHtml = (slug, i) => {
+    const all = flatModels();
+    const q = pickerOpen.query.trim().toLowerCase();
+    const hits = q
+      ? all.filter(x => (x.label + " " + x.model + " " + x.modelLabel).toLowerCase().includes(q))
+      : all;
+    const byProv = new Map();
+    hits.forEach(x => {
+      if (!byProv.has(x.provider)) byProv.set(x.provider, { name: x.label, rows: [] });
+      byProv.get(x.provider).rows.push(x);
+    });
+    const groups = [...byProv.entries()].map(([slugKey, g]) => `
+      <div class="pk-group">
+        <div class="pk-head">${esc(g.name || slugKey)} <span class="pk-n">${g.rows.length}</span></div>
+        ${g.rows.map(x => `
+          <button class="pk-row" data-slug="${esc(slug)}" data-i="${i}"
+                  data-prov="${esc(x.provider)}" data-model="${esc(storedModelId(x))}"
+                  data-adapter="${esc(x.adapter)}">
+            <span class="pk-model">${esc(x.modelLabel || x.model)}</span>
+            ${x.modelLabel ? `<span class="pk-id">${esc(x.model)}</span>` : ""}
+          </button>`).join("")}
+      </div>`).join("");
+    return `
+      <div class="pk" data-slug="${esc(slug)}" data-i="${i}">
+        <input class="pk-q" placeholder="search provider or model…" value="${esc(pickerOpen.query)}" autocomplete="off">
+        <div class="pk-list">
+          ${groups || `<div class="empty">${all.length ? "no model matches that search" : "no models yet — add a provider in Settings and refresh it"}</div>`}
+          <button class="pk-row pk-custom" data-slug="${esc(slug)}" data-i="${i}">
+            <span class="pk-model">Use a custom id…</span>
+            <span class="pk-id">type provider/model by hand</span>
+          </button>
+        </div>
+        <div class="pk-foot"><button class="btn ghost small pk-close">Cancel</button></div>
+      </div>`;
+  };
 
   const chipList = (slug, field, values, placeholder) => `
     <div class="chips" data-field="${field}">
@@ -1231,13 +1399,6 @@ function agentsModal(openSlug = "") {
     const d = draft.get(a.slug);
     const isOpen = open.has(a.slug);
     const ladder = d.ladder;
-    // Group consecutive rungs by provider so the nested level reads as
-    // "here are my opencode models", not as a flat undifferentiated list.
-    const groups = [];
-    ladder.forEach((m, i) => {
-      const g = groups.find(x => x.provider === (m.provider || ""));
-      if (g) g.rows.push({ m, i }); else groups.push({ provider: m.provider || "", rows: [{ m, i }] });
-    });
 
     return `<div class="adr ${isOpen ? "open" : ""}" data-slug="${esc(a.slug)}">
       <button class="adr-head" data-adr-toggle="${esc(a.slug)}">
@@ -1259,23 +1420,18 @@ function agentsModal(openSlug = "") {
           <div class="field"><label>Division</label><select class="f-div">${s.divisions.map(x => `<option value="${esc(x.slug)}" ${x.slug === d.division ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></div>
           <div class="field"><label>Adapter (primary)</label><select class="f-adapter">${s.adapters.map(x => `<option ${x === d.adapter ? "selected" : ""}>${x}</option>`).join("")}</select></div>
         </div>
-        <div class="field"><label>Primary model</label><input class="f-model" value="${esc(d.model)}" placeholder="model, or shell command with {{prompt}}"></div>
         <div class="field"><label>Skills <span class="hint">· rendered per adapter, honoured by hermes</span></label>
           ${chipList(a.slug, "skills", d.skills, "add a skill and press Enter")}</div>
         <div class="field"><label>Plugins</label>
           ${chipList(a.slug, "plugins", d.plugins, "add a plugin and press Enter")}</div>
         <label class="f-enabled-row"><input type="checkbox" class="f-enabled" ${d.enabled ? "checked" : ""}> enabled (disabled agents take no new work)</label>
 
-        <div class="sec" style="margin-top:12px">Fallback models <span class="hint">· tried top to bottom when the primary fails</span></div>
+        <div class="sec" style="margin-top:12px">Models <span class="hint">· the first is the primary, the rest rotate top to bottom when it fails</span></div>
         <div class="ladder">
-          ${groups.map(g => `
-            <div class="mgroup">
-              <div class="mgroup-head"><span class="prov">${esc(g.provider || "unspecified provider")}</span><span class="n">${g.rows.length}</span></div>
-              ${g.rows.map(r => modelRow(a.slug, r.i, r.m)).join("")}
-            </div>`).join("") || `<div class="empty">no fallbacks — a provider failure will just fail the ticket</div>`}
+          ${ladder.map((m, i) => modelRow(a.slug, i, m, i === 0)).join("") || `<div class="empty">no model yet — pick one to give this agent something to run</div>`}
         </div>
         <div style="display:flex;gap:7px;margin-top:7px">
-          <button class="btn ghost small m-add" data-slug="${esc(a.slug)}">+ Add model</button>
+          <button class="btn ghost small m-add" data-slug="${esc(a.slug)}">+ Add fallback</button>
           <button class="btn ghost small m-clear" data-slug="${esc(a.slug)}" title="Remove cooling-down marks">✕ Clear cooldowns</button>
         </div>
 
@@ -1389,7 +1545,78 @@ function agentsModal(openSlug = "") {
     });
     m.querySelectorAll(".ag-save").forEach(b => b.onclick = () => saveAgent(b.dataset.slug));
     m.querySelectorAll(".ag-del").forEach(b => b.onclick = () => deleteAgent(b.dataset.slug));
+
+    // ---- model picker wiring ----
+    // Clicking a rung opens the searchable picker in place, right under the row.
+    m.querySelectorAll(".rung-pick").forEach(b => {
+      b.onclick = () => {
+        syncDraft();
+        const slug = b.closest(".adr").dataset.slug;
+        const i = +b.dataset.i;
+        const same = pickerOpen.slug === slug && pickerOpen.i === i;
+        pickerOpen.slug = same ? null : slug;
+        pickerOpen.i = same ? null : i;
+        pickerOpen.query = "";
+        rerender();
+        if (!same) {
+          const q = $("#modal").querySelector(".pk-q");
+          if (q) q.focus();
+        }
+      };
+    });
+    // Search filters as you type, without a round-trip.
+    m.querySelectorAll(".pk-q").forEach(inp => {
+      inp.oninput = () => {
+        pickerOpen.query = inp.value;
+        const pk = inp.closest(".pk");
+        // Repaint only the list so the caret does not jump.
+        const holder = document.createElement("div");
+        holder.innerHTML = pickerHtml(pk.dataset.slug, +pk.dataset.i);
+        const fresh = holder.querySelector(".pk-list");
+        const old = pk.querySelector(".pk-list");
+        if (fresh && old) old.replaceWith(fresh);
+        bindPickerRows(pk);
+      };
+      inp.onkeydown = (e) => {
+        if (e.key === "Escape") { pickerOpen.slug = null; rerender(); }
+        if (e.key === "Enter") {
+          const first = pkRowFirst(inp.closest(".pk"));
+          if (first) first.click();
+        }
+      };
+    });
+    const bindPickerRows = (pk) => {
+      pk.querySelectorAll(".pk-row").forEach(row => {
+        row.onclick = () => {
+          syncDraft();
+          const slug = pk.dataset.slug;
+          const i = +pk.dataset.i;
+          const r = draft.get(slug).ladder[i];
+          if (!r) return;
+          if (row.classList.contains("pk-custom")) {
+            // Escape hatch: the old typed id, deliberately not the default.
+            const typed = prompt("Model id (provider/model):", r.model || "");
+            if (!typed) return;
+            r.model = typed.trim();
+            r.provider = r.model.includes("/") ? r.model.split("/")[0] : "";
+          } else {
+            r.provider = row.dataset.prov;
+            r.model = row.dataset.model;
+            if (row.dataset.adapter) r.adapter = row.dataset.adapter;
+          }
+          pickerOpen.slug = null;
+          pickerOpen.i = null;
+          rerender();
+        };
+      });
+      const close = pk.querySelector(".pk-close");
+      if (close) close.onclick = () => { pickerOpen.slug = null; rerender(); };
+    };
+    m.querySelectorAll(".pk").forEach(bindPickerRows);
   };
+
+  /// The first real model row in an open picker (the custom escape hatch last).
+  const pkRowFirst = (pk) => pk ? pk.querySelector(".pk-group .pk-row") : null;
 
   /// Pull the currently visible inputs back into the draft before any re-render,
   /// so switching drawers or adding a row never discards unsaved typing.
@@ -1402,14 +1629,14 @@ function agentsModal(openSlug = "") {
       if (q(".f-role")) d.role = q(".f-role").value;
       if (q(".f-div")) d.division = q(".f-div").value;
       if (q(".f-adapter")) d.adapter = q(".f-adapter").value;
-      if (q(".f-model")) d.model = q(".f-model").value;
       if (q(".f-enabled")) d.enabled = q(".f-enabled").checked;
+      // The ladder rows carry the models now: the picker writes into the draft
+      // directly, so only the adapter select needs reading back here.
       el.querySelectorAll(".mrow").forEach(row => {
         const i = +row.dataset.i;
         const r = d.ladder[i]; if (!r) return;
-        r.provider = row.querySelector(".m-prov").value;
-        r.model = row.querySelector(".m-name").value;
-        r.adapter = row.querySelector(".m-ad").value;
+        const ad = row.querySelector(".m-ad");
+        if (ad) r.adapter = ad.value;
       });
     });
   };
@@ -1419,6 +1646,9 @@ function agentsModal(openSlug = "") {
     const d = draft.get(slug);
     if (!d.name.trim()) return toast(`name is required for ${slug}`, true);
     const models = d.ladder.filter(r => r.model.trim() || r.provider.trim());
+    // The primary IS rung 0. `agents.model` stays populated because the adapters
+    // and the seed path read it, so keep the two in step from one source.
+    d.model = models.length ? models[0].model : "";
     try {
       await api(`/api/agents/${encodeURIComponent(slug)}`, { method: "PATCH", body: {
         name: d.name.trim(), role: d.role, division: d.division,
@@ -1552,6 +1782,129 @@ function eventsModal() {
 $("#btn-new").onclick = newTicketModal;
 $("#btn-agents").onclick = agentsModal;
 $("#btn-add-div").onclick = addDivisionModal;
+$("#btn-settings").onclick = settingsModal;
+
+/// Provider settings: the registry the model picker draws from. Add a provider,
+/// give it a key, and pull its model list. A key is write-only — the board shows
+/// "key set" and nothing else, because the API never returns it.
+function settingsModal() {
+  const render = () => {
+    const provs = S.providers || [];
+    const row = (p) => `
+      <div class="prov-row" data-slug="${esc(p.slug)}">
+        <div class="prov-main">
+          <span class="prov-name">${esc(p.label || p.name)}</span>
+          <span class="prov-slug">${esc(p.slug)}</span>
+          <span class="prov-kind">${esc(p.kind)}</span>
+          <span class="prov-key ${p.key_state}">${p.key_state === "set" ? "key set ✓" : p.key_state === "none" ? "no key needed" : "no key"}</span>
+        </div>
+        <div class="prov-sub">
+          <span class="prov-url">${esc(p.base_url || "—")}</span>
+          <span class="prov-n">${(p.models || []).length} model${(p.models || []).length === 1 ? "" : "s"}</span>
+          ${p.models_fetched_at ? `<span class="prov-when">${esc(p.models_fetched_at)}</span>` : `<span class="prov-when">never fetched</span>`}
+        </div>
+        <div class="prov-acts">
+          <button class="btn ghost small p-refresh" data-slug="${esc(p.slug)}">↻ Fetch models</button>
+          <button class="btn ghost small p-key" data-slug="${esc(p.slug)}">${p.key_state === "set" ? "Replace key" : "Set key"}</button>
+          <button class="btn small subtle-danger p-del" data-slug="${esc(p.slug)}">Delete</button>
+        </div>
+        <div class="prov-keyrow" data-slug="${esc(p.slug)}" hidden>
+          <input class="p-keyin" type="password" placeholder="paste the API key (never shown again)" autocomplete="off">
+          <button class="btn small primary p-keysave" data-slug="${esc(p.slug)}">Save key</button>
+          <span class="prov-hint">stored encrypted; the API only ever reports “key set”</span>
+        </div>
+      </div>`;
+    openModal(`<h3 class="wide">⚙ Providers</h3>
+      <p class="sub">Where models come from. Each provider's fetched models feed the picker in every agent's settings —
+      no model id has to be typed by hand.</p>
+      <div class="provlist">${provs.map(row).join("") || `<div class="empty">no providers yet</div>`}</div>
+      <div class="sec" style="margin-top:14px">Add a provider</div>
+      <div class="row2">
+        <div class="field"><label>Slug</label><input class="np-slug" placeholder="openrouter"></div>
+        <div class="field"><label>Name</label><input class="np-name" placeholder="OpenRouter"></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Kind</label><select class="np-kind">
+          <option value="openai_compatible">openai_compatible</option>
+          <option value="anthropic">anthropic</option>
+          <option value="ollama">ollama</option>
+          <option value="manual">manual</option>
+        </select></div>
+        <div class="field"><label>Base URL</label><input class="np-base" placeholder="https://…/v1"></div>
+      </div>
+      <div class="field"><label>API key <span class="hint">· leave empty for ollama / manual</span></label>
+        <input class="np-key" type="password" placeholder="sk-…" autocomplete="off"></div>
+      <div class="modal-actions">
+        <button class="btn ghost" id="np-cancel">Close</button>
+        <button class="btn primary" id="np-add">Add provider ✨</button>
+      </div>`);
+
+    const m = $("#modal");
+    m.querySelectorAll(".p-key").forEach(b => b.onclick = () => {
+      const r = m.querySelector(`.prov-keyrow[data-slug="${CSS.escape(b.dataset.slug)}"]`);
+      if (r) r.hidden = !r.hidden;
+    });
+    m.querySelectorAll(".p-keysave").forEach(b => b.onclick = async () => {
+      const slug = b.dataset.slug;
+      const inp = m.querySelector(`.prov-keyrow[data-slug="${CSS.escape(slug)}"] .p-keyin`);
+      const key = inp ? inp.value.trim() : "";
+      if (!key) return toast("paste a key first", true);
+      try {
+        await api(`/api/providers/${encodeURIComponent(slug)}/key`,
+          { method: "POST", body: { api_key: key } });
+        if (inp) inp.value = "";
+        await refreshProviders();
+        render();
+        toast(`${slug}: key saved`);
+      } catch (e) { toast(e.message, true); }
+    });
+    m.querySelectorAll(".p-refresh").forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      try {
+        const r = await api(`/api/providers/${encodeURIComponent(b.dataset.slug)}/refresh`, { method: "POST" });
+        await refreshProviders();
+        render();
+        toast(r.refresh_error ? `${b.dataset.slug}: ${r.refresh_error}` : `${b.dataset.slug}: models refreshed`, !!r.refresh_error);
+      } catch (e) { toast(e.message, true); b.disabled = false; }
+    });
+    m.querySelectorAll(".p-del").forEach(b => b.onclick = async () => {
+      try {
+        await api(`/api/providers/${encodeURIComponent(b.dataset.slug)}`, { method: "DELETE" });
+        await refreshProviders();
+        render();
+        toast(`deleted ${b.dataset.slug}`);
+      } catch (e) { toast(e.message, true); }
+    });
+    const cancel = $("#np-cancel");
+    if (cancel) cancel.onclick = () => settingsModal();
+    const add = $("#np-add");
+    if (add) add.onclick = async () => {
+      const val = (sel) => { const el = m.querySelector(sel); return el ? el.value.trim() : ""; };
+      const body = {
+        slug: val(".np-slug"), name: val(".np-name"), kind: val(".np-kind"),
+        base_url: val(".np-base"), api_key: val(".np-key") || undefined,
+      };
+      if (!body.slug || !body.name) return toast("slug and name are required", true);
+      try {
+        const r = await api("/api/providers", { method: "POST", body });
+        await refreshProviders();
+        render();
+        toast(r.refresh_error ? `${body.slug} added — ${r.refresh_error}` : `${body.slug} added`, !!r.refresh_error);
+      } catch (e) { toast(e.message, true); }
+    };
+  };
+  render();
+}
+
+/// Re-read the registry, then drop the cached copy so both the settings modal and
+/// the picker see the new rows.
+async function refreshProviders() {
+  S.providers = null;
+  try {
+    const pr = await api("/api/providers");
+    S.providers = pr.providers || [];
+  } catch (e) { S.providers = []; }
+}
 
 async function toggleDivisionPause(div) {
   if (!div) return;
