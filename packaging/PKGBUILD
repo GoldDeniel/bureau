@@ -1,7 +1,7 @@
 # Maintainer: Daniel <you@example.com>
 # Packages the prebuilt target/release/bureau (run packaging/build-all.sh).
 pkgname=bureau
-pkgver=0.6.0
+pkgver=0.6.1
 pkgrel=1
 pkgdesc="Ticket system for a company of AI agents"
 arch=('x86_64')

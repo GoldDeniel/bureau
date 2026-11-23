@@ -174,7 +174,13 @@ mod cipher {
         aead::{Aead, KeyInit, OsRng, rand_core::RngCore},
     };
 
-    /// 32-byte KEK, hex in `BUREAU_KEK`, or read from `<state>/kek`.
+    /// 32-byte KEK. Order: `BUREAU_KEK` (64 hex chars) → `<BUREAU_KEK_FILE>` →
+    /// `<state dir>/kek`, generating the last one on first use.
+    ///
+    /// Generating a key file is the right default: the alternative is refusing the
+    /// very first key a user tries to save, which reads as "adding a provider is
+    /// broken". The file is 0600 in the state directory, OUTSIDE the database, so
+    /// a copied `bureau.db` still yields nothing.
     pub fn kek() -> Result<Option<[u8; 32]>> {
         if let Ok(hex) = std::env::var("BUREAU_KEK") {
             let bytes = decode_hex(hex.trim())
@@ -186,7 +192,52 @@ mod cipher {
             out.copy_from_slice(&bytes);
             return Ok(Some(out));
         }
-        Ok(None)
+        let path = kek_path();
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            if let Some(bytes) = decode_hex(existing.trim()) {
+                if bytes.len() == 32 {
+                    let mut out = [0u8; 32];
+                    out.copy_from_slice(&bytes);
+                    return Ok(Some(out));
+                }
+            }
+            return Err(anyhow!(
+                "{} exists but is not 64 hex characters — refusing to overwrite it",
+                path.display()
+            ));
+        }
+        let mut secret = [0u8; 32];
+        OsRng.fill_bytes(&mut secret);
+        let hex: String = secret.iter().map(|b| format!("{b:02x}")).collect();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).ok();
+        }
+        std::fs::write(&path, &hex)
+            .with_context(|| format!("writing the key-encryption key to {}", path.display()))?;
+        // Owner-only on Unix; without this the KEK would be world-readable and the
+        // "outside the database" guarantee would mean nothing.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+        tracing::info!("generated a key-encryption key at {}", path.display());
+        Ok(Some(secret))
+    }
+
+    fn kek_path() -> std::path::PathBuf {
+        if let Ok(p) = std::env::var("BUREAU_KEK_FILE") {
+            return std::path::PathBuf::from(p);
+        }
+        // BUREAU_DB sits in the state dir, so `<db dir>/kek` travels with the
+        // database without being inside it.
+        match std::env::var("BUREAU_DB") {
+            Ok(db) => std::path::Path::new(&db)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("kek"),
+            Err(_) => std::path::PathBuf::from("kek"),
+        }
     }
 
     fn decode_hex(s: &str) -> Option<Vec<u8>> {
@@ -298,10 +349,7 @@ pub fn create(conn: &Connection, input: &ProviderInput) -> Result<Provider> {
             #[cfg(feature = "keys")]
             {
                 let kek = kek()?.ok_or_else(|| {
-                    anyhow!(
-                        "no key-encryption key configured: set BUREAU_KEK (64 hex chars). \
-                         Refusing to store an API key unencrypted."
-                    )
+                    anyhow!("this build has no key-encryption key support enabled")
                 })?;
                 let (n, c) = encrypt(&kek, k)?;
                 (Some(n), Some(c))
@@ -344,9 +392,8 @@ pub fn set_key(conn: &Connection, slug: &str, key: Option<&str>) -> Result<()> {
         Some(k) => {
             #[cfg(feature = "keys")]
             {
-                let kek = kek()?.ok_or_else(|| {
-                    anyhow!("no key-encryption key configured: set BUREAU_KEK (64 hex chars)")
-                })?;
+                let kek = kek()?
+                    .ok_or_else(|| anyhow!("no key-encryption key support in this build"))?;
                 let (n, c) = encrypt(&kek, k)?;
                 conn.execute(
                     "UPDATE providers SET key_ciphertext=?1, key_nonce=?2 WHERE slug=?3",

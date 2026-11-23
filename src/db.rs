@@ -162,8 +162,11 @@ CREATE TABLE IF NOT EXISTS providers (
 fn seed_providers(conn: &Connection) -> Result<()> {
     // (slug, name, kind, base_url, adapter, label)
     const SEEDS: &[(&str, &str, &str, &str, &str, &str)] = &[
-        ("opencode", "opencode", "openai_compatible", "https://opencode.ai/zen/v1", "opencode", ""),
-        ("opencode-go", "opencode go", "openai_compatible", "https://opencode.ai/zen/v1", "opencode", ""),
+        // Two distinct catalogs, not one: Zen (`zen/v1`) and Go (`zen/go/v1`)
+        // serve different models for different keys. Pointing both at `zen/v1`
+        // made the Go key list Zen's models and vice versa.
+        ("opencode", "opencode (Zen)", "openai_compatible", "https://opencode.ai/zen/v1", "opencode", ""),
+        ("opencode-go", "opencode go", "openai_compatible", "https://opencode.ai/zen/go/v1", "opencode", ""),
         ("openrouter", "OpenRouter", "openai_compatible", "https://openrouter.ai/api/v1", "opencode", ""),
         ("nvidia", "NVIDIA", "openai_compatible", "https://integrate.api.nvidia.com/v1", "opencode", ""),
         ("openai", "OpenAI", "openai_compatible", "https://api.openai.com/v1", "opencode", ""),
@@ -180,6 +183,23 @@ fn seed_providers(conn: &Connection) -> Result<()> {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}', '[]', 1, ?7) \
              ON CONFLICT(slug) DO NOTHING",
             params![slug, name, kind, base, adapter, label, now],
+        )?;
+    }
+    // Repair rows an older seed wrote with a wrong base URL. `ON CONFLICT DO
+    // NOTHING` means a bad seed is permanent otherwise. Scoped narrowly on
+    // purpose: only the exact wrong value is rewritten, so a base URL the user
+    // typed themselves is never touched.
+    for (slug, wrong, right) in [
+        (
+            "opencode-go",
+            "https://opencode.ai/zen/v1",
+            "https://opencode.ai/zen/go/v1",
+        ),
+        ("opencode-go", "", "https://opencode.ai/zen/go/v1"),
+    ] {
+        conn.execute(
+            "UPDATE providers SET base_url=?1 WHERE slug=?2 AND base_url=?3",
+            params![right, slug, wrong],
         )?;
     }
     Ok(())
@@ -1491,6 +1511,32 @@ mod tests {
         seed_providers(&conn).unwrap();
         let ollama = crate::providers::get(&conn, "ollama").unwrap().unwrap();
         assert_eq!(ollama.base_url, "http://192.168.2.9:11434");
+    }
+
+    #[test]
+    fn seeding_repoints_a_wrongly_seeded_opencode_go_url() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        seed_providers(&conn).unwrap();
+        // An older seed wrote the Zen URL for Go. Detection must correct it.
+        conn.execute(
+            "UPDATE providers SET base_url='https://opencode.ai/zen/v1' WHERE slug='opencode-go'",
+            [],
+        )
+        .unwrap();
+        seed_providers(&conn).unwrap();
+        let go = crate::providers::get(&conn, "opencode-go").unwrap().unwrap();
+        assert_eq!(go.base_url, "https://opencode.ai/zen/go/v1");
+
+        // A URL the user chose themselves must survive untouched.
+        conn.execute(
+            "UPDATE providers SET base_url='https://my-proxy.local/v1' WHERE slug='opencode-go'",
+            [],
+        )
+        .unwrap();
+        seed_providers(&conn).unwrap();
+        let go = crate::providers::get(&conn, "opencode-go").unwrap().unwrap();
+        assert_eq!(go.base_url, "https://my-proxy.local/v1");
     }
 
     #[test]
