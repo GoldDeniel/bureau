@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 pub type Db = Arc<Mutex<Connection>>;
 
-pub const STATUSES: [&str; 8] = [
+pub const STATUSES: [&str; 9] = [
     "new",
     "triaged",
     "queued",
@@ -17,6 +17,7 @@ pub const STATUSES: [&str; 8] = [
     "done",
     "blocked",
     "failed",
+    "testing",
 ];
 
 pub fn now() -> String {
@@ -41,7 +42,7 @@ CREATE TABLE IF NOT EXISTS agents (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     slug        TEXT NOT NULL UNIQUE,
     name        TEXT NOT NULL,
-    role        TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('manager','worker')),
+    role        TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('manager','worker','tester')),
     division_id INTEGER REFERENCES divisions(id) ON DELETE CASCADE,
     adapter     TEXT NOT NULL DEFAULT 'demo',
     model       TEXT NOT NULL DEFAULT '',
@@ -65,7 +66,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     title       TEXT NOT NULL,
     body        TEXT NOT NULL DEFAULT '',
     status      TEXT NOT NULL DEFAULT 'new'
-                CHECK (status IN ('new','triaged','queued','in_progress','review','done','blocked','failed')),
+                CHECK (status IN ('new','triaged','queued','in_progress','review','done','blocked','failed','testing')),
     priority    INTEGER NOT NULL DEFAULT 2,
     assignee_id INTEGER REFERENCES agents(id) ON DELETE SET NULL,
     created_by  TEXT NOT NULL DEFAULT 'human',
@@ -157,6 +158,73 @@ CREATE TABLE IF NOT EXISTS providers (
 );
 "#;
 
+/// Whether `table` already has `column`. Used instead of assuming, because
+/// `CREATE TABLE IF NOT EXISTS` never alters an existing table.
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// SQLite cannot alter a CHECK constraint. When a stored CREATE TABLE still has
+/// the old value list, rebuild the table with `add` appended: rename, create,
+/// copy every column, drop. Code validation stays authoritative either way.
+fn add_check_value(conn: &Connection, table: &str, old: &str, add: &str) -> Result<()> {
+    let sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+        [table],
+        |r| r.get(0),
+    )?;
+    if sql.contains(add) || !sql.contains(old) {
+        return Ok(());
+    }
+    let new_sql = sql.replacen(old, &format!("{old},{add}"), 1);
+    let columns = table_columns(conn, table)?.join(", ");
+    // Child tables must keep pointing at `table`: legacy_alter_table stops the
+    // rename from rewriting their REFERENCES, and foreign_keys=OFF stops the old
+    // rows from cascading into them when the table is dropped.
+    let seq: Option<i64> = conn
+        .query_row("SELECT seq FROM sqlite_sequence WHERE name=?1", [table], |r| {
+            r.get(0)
+        })
+        .optional()
+        .unwrap_or(None);
+    conn.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;")?;
+    let rebuilt = conn.execute_batch(&format!(
+        "BEGIN;
+         ALTER TABLE {table} RENAME TO {table}_old;
+         {new_sql};
+         INSERT INTO {table} ({columns}) SELECT {columns} FROM {table}_old;
+         DROP TABLE {table}_old;
+         COMMIT;"
+    ));
+    if rebuilt.is_err() {
+        conn.execute_batch("ROLLBACK").ok();
+    }
+    conn.execute_batch("PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON;")?;
+    rebuilt?;
+    // Keep the AUTOINCREMENT counter: a deleted highest row must not hand out a
+    // ref that was already used.
+    if let Some(seq) = seq {
+        conn.execute(
+            "UPDATE sqlite_sequence SET seq = MAX(seq, ?1) WHERE name = ?2",
+            params![seq, table],
+        )?;
+    }
+    Ok(())
+}
+
 /// Insert the provider rows the board used to hardcode, once. Idempotent: a slug
 /// that already exists is left exactly as the user configured it.
 fn seed_providers(conn: &Connection) -> Result<()> {
@@ -241,6 +309,13 @@ pub fn open(path: &str) -> Result<Db> {
             conn.execute_batch(ddl)?;
         }
     }
+    // The allowed role/status values live in a CHECK, and SQLite cannot alter one
+    // in place. A database created before testers existed keeps the old list, so
+    // rebuild those two tables once; on a fresh database this is a no-op.
+    add_check_value(&conn, "agents", "'manager','worker'", "'tester'")?;
+    add_check_value(&conn, "tickets", "'blocked','failed'", "'testing'")?;
+    // A rebuild drops the table's indexes; recreate them.
+    conn.execute_batch(SCHEMA)?;
     // A crash leaves agents marked running; nothing can actually be running at boot.
     conn.execute("UPDATE agents SET status='idle' WHERE status='running'", [])?;
     // Seed the provider registry once, from the names the board used to hardcode,
@@ -633,6 +708,19 @@ pub fn workers_for(conn: &Connection, division_id: i64) -> Result<Vec<Agent>> {
     Ok(out)
 }
 
+/// Testers are a separate roster: they never appear in `workers_for`, so no
+/// build-work pick can hand a tester a queued ticket.
+pub fn testers_for(conn: &Connection, division_id: i64) -> Result<Vec<Agent>> {
+    let sql = format!(
+        "{AGENT_SELECT} WHERE a.division_id = ?1 AND a.role = 'tester' AND a.enabled = 1 ORDER BY a.id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let out = stmt
+        .query_map([division_id], map_agent)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(out)
+}
+
 pub fn manager_for(conn: &Connection, division_id: i64) -> Result<Option<Agent>> {
     let sql = format!("{AGENT_SELECT} WHERE a.division_id = ?1 AND a.role = 'manager'");
     Ok(conn.query_row(&sql, [division_id], map_agent).optional()?)
@@ -682,9 +770,9 @@ pub struct AgentPatch {
 /// constraint a patch can hit; it is reported as a plain API error.
 pub fn update_agent(conn: &Connection, slug: &str, p: &AgentPatch) -> Result<()> {
     if let Some(role) = &p.role
-        && !matches!(role.as_str(), "manager" | "worker")
+        && !matches!(role.as_str(), "manager" | "worker" | "tester")
     {
-        anyhow::bail!("invalid role '{}': expected 'manager' or 'worker'", role);
+        anyhow::bail!("invalid role '{}': expected 'manager', 'worker' or 'tester'", role);
     }
     let division_id = match &p.division {
         Some(div) => Some(
@@ -1511,6 +1599,80 @@ mod tests {
         seed_providers(&conn).unwrap();
         let ollama = crate::providers::get(&conn, "ollama").unwrap().unwrap();
         assert_eq!(ollama.base_url, "http://192.168.2.9:11434");
+    }
+
+    #[test]
+    fn an_old_database_gains_the_tester_role_and_testing_status() {
+        // A database created before testers existed has the old CHECK lists.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('manager','worker')),
+                division_id INTEGER, adapter TEXT NOT NULL DEFAULT 'demo',
+                model TEXT NOT NULL DEFAULT '', system_hint TEXT NOT NULL DEFAULT '',
+                skills TEXT NOT NULL DEFAULT '[]', plugins TEXT NOT NULL DEFAULT '[]',
+                enabled INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'idle',
+                created_at TEXT NOT NULL);
+             CREATE TABLE tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ref TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'new'
+                    CHECK (status IN ('new','triaged','queued','in_progress','review','done','blocked','failed')),
+                priority INTEGER NOT NULL DEFAULT 2, assignee_id INTEGER,
+                division_id INTEGER, parent_id INTEGER,
+                created_by TEXT NOT NULL DEFAULT 'human', created_at TEXT NOT NULL);
+             INSERT INTO agents (slug, name, created_at) VALUES ('oldsoul', 'Old Soul', '2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+
+        // The same migration `open()` runs.
+        add_check_value(&conn, "agents", "'manager','worker'", "'tester'").unwrap();
+        add_check_value(&conn, "tickets", "'blocked','failed'", "'testing'").unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+
+        // Both new values are now accepted...
+        conn.execute(
+            "UPDATE agents SET role='tester' WHERE slug='oldsoul'",
+            [],
+        )
+        .expect("the agents CHECK must now allow 'tester'");
+        conn.execute(
+            "INSERT INTO tickets (ref, title, status, created_at)
+             VALUES ('BUR-1','t','testing','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("the tickets CHECK must now allow 'testing'");
+
+        // ...and the existing row survived the table rebuild.
+        let name: String = conn
+            .query_row("SELECT name FROM agents WHERE slug='oldsoul'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "Old Soul");
+        // Running it twice must be a no-op, not a rebuild loop.
+        add_check_value(&conn, "agents", "'manager','worker'", "'tester'").unwrap();
+        let role: String = conn
+            .query_row("SELECT role FROM agents WHERE slug='oldsoul'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(role, "tester");
+    }
+
+    #[test]
+    fn testers_are_not_pickable_as_workers() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let div = create_division(&conn, "d", "D", "", "/tmp").unwrap();
+        create_agent(&conn, "w1", "W1", "worker", Some(div), "demo", "", "").unwrap();
+        create_agent(&conn, "t1", "T1", "tester", Some(div), "demo", "", "").unwrap();
+
+        let workers = workers_for(&conn, div).unwrap();
+        let testers = testers_for(&conn, div).unwrap();
+        assert_eq!(workers.len(), 1, "a tester must not appear in the worker roster");
+        assert_eq!(workers[0].slug, "w1");
+        assert_eq!(testers.len(), 1);
+        assert_eq!(testers[0].slug, "t1");
     }
 
     #[test]
