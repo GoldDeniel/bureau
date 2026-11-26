@@ -54,6 +54,7 @@ mkdir -p "$DIST"
 "$RPMBUILD" -bb \
   --define "_topdir $TOP" \
   --define "stage $STAGE" \
+  --define "version $VERSION" \
   --define "_binary_payload w2T.xzdio" \
   "$HERE/bureau.spec"
 

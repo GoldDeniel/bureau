@@ -1,8 +1,13 @@
 %define debug_package %{nil}
 %define _build_id_links none
 
+# Version comes from build-rpm.sh (`--define version <Cargo.toml version>`) so
+# the package can never drift from the binary it wraps. The literal below is
+# only a fallback for a bare `rpmbuild -bb`.
+%{!?version: %global version 0.7.0}
+
 Name:           bureau
-Version:        0.6.2
+Version:        %{version}
 Release:        1%{?dist}
 Summary:        Ticket system for a company of AI agents
 License:        MIT
