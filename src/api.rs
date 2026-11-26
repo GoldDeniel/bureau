@@ -195,7 +195,7 @@ struct Stats {
 }
 
 async fn snapshot(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let (divisions, agents, tickets, events, latest, failures, ladders) = {
+    let (divisions, agents, tickets, events, latest, rung, failures, ladders) = {
         let conn = st.db.lock().unwrap();
         (
             db::divisions(&conn)?,
@@ -205,6 +205,9 @@ async fn snapshot(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
             // One attempt per ticket is enough to label a card; the full list
             // comes from GET /api/tickets/{key} when the drawer opens.
             db::latest_attempts(&conn)?,
+            // ...and the rung the latest run landed on, so every card can name
+            // the provider/model that is (or was last) working the ticket.
+            db::last_rung(&conn)?,
             db::failure_counts(&conn)?,
             db::all_agent_models(&conn)?,
         )
@@ -260,6 +263,8 @@ async fn snapshot(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
         "stats": stats,
         // ticket_id -> its most recent classified failure
         "attempts": latest,
+        // ticket_id -> the provider/model its latest run used
+        "rungs": rung,
         // failure kind -> number of distinct tickets affected
         "failure_totals": failure_totals,
         // agent_id -> ordered fallback ladder

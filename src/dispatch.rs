@@ -331,6 +331,12 @@ async fn run_with_ladder(
 
     let mut attempt: u32 = 0;
     let mut index: usize = 0;
+    // The attempt row for the run currently in flight. Every run opens one
+    // before the process starts, so the board can name the model that is
+    // working — not just the models that died.
+    let mut rung_row: Option<i64> = None;
+    // The rung still needs recording when the process is about to start.
+    let mut needs_start = true;
 
     loop {
         attempt += 1;
@@ -346,12 +352,22 @@ async fn run_with_ladder(
         }
         let provider = rotation::provider_of(&tried.model);
 
+        if needs_start {
+            let conn = db.lock().unwrap();
+            rung_row = db::record_rung_start(&conn, ticket.id, &tried, provider).ok();
+        }
+
         match adapters::run_agent(&tried, prompt, ctx).await {
             Ok(output) => {
-                // The rung works again: clear any stale cooldown.
-                if let Some(rung) = usable.get(index) {
+                {
                     let conn = db.lock().unwrap();
-                    let _ = db::set_model_cooldown(&conn, rung.id, 0);
+                    // The rung works again: clear any stale cooldown.
+                    if let Some(rung) = usable.get(index) {
+                        let _ = db::set_model_cooldown(&conn, rung.id, 0);
+                    }
+                    if let Some(row) = rung_row {
+                        let _ = db::settle_rung(&conn, row, "ok", "");
+                    }
                 }
                 return Ok(output);
             }
@@ -363,15 +379,30 @@ async fn run_with_ladder(
 
                 {
                     let conn = db.lock().unwrap();
-                    let _ = db::record_attempt(
-                        &conn,
-                        ticket.id,
-                        &tried,
-                        provider,
-                        classified.kind.as_str(),
-                        &classified.detail,
-                        &raw,
-                    );
+                    match rung_row.take() {
+                        Some(row) => {
+                            // Settle the run's own row: a retry on the same rung
+                            // opens a fresh one instead of overwriting history.
+                            let _ = db::settle_rung(
+                                &conn,
+                                row,
+                                classified.kind.as_str(),
+                                &classified.detail,
+                            );
+                            let _ = db::set_attempt_raw(&conn, row, &raw);
+                        }
+                        None => {
+                            let _ = db::record_attempt(
+                                &conn,
+                                ticket.id,
+                                &tried,
+                                provider,
+                                classified.kind.as_str(),
+                                &classified.detail,
+                                &raw,
+                            );
+                        }
+                    }
                     if let Some(rung) = usable.get(index) {
                         let secs = rotation::cooldown_secs(classified.kind);
                         if secs > 0 {
@@ -389,7 +420,10 @@ async fn run_with_ladder(
                 match action {
                     // Same rung again: a rate-limit blip is often gone by the
                     // time the process has torn down.
-                    rotation::Action::RetrySame => continue,
+                    rotation::Action::RetrySame => {
+                        needs_start = true;
+                        continue;
+                    }
                     rotation::Action::Rotate => {
                         // Say which model is being skipped and why, on the
                         // ticket, so the board reads as a chain of attempts.
@@ -410,6 +444,7 @@ async fn run_with_ladder(
                         }
                         index += 1;
                         attempt = 0; // a fresh rung gets its own single retry
+                        needs_start = true;
                         continue;
                     }
                     rotation::Action::Park => {

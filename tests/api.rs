@@ -775,3 +775,30 @@ async fn a_failed_attempt_is_classified_and_served_with_the_ticket() {
     let card = snap["attempts"].as_object().unwrap();
     assert!(card.contains_key(&ticket_id.to_string()), "snapshot labels the card");
 }
+
+/// The card header names the model on the ticket, not only the failures: a
+/// ticket whose run is still going must show `provider/model` too.
+#[tokio::test]
+async fn the_snapshot_names_the_model_working_each_ticket() {
+    let (app, db) = setup();
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/api/tickets",
+        Some(json!({ "title": "t", "body": "", "division": "test", "priority": 2 })),
+    )
+    .await;
+    let ticket_id = created["ticket"]["id"].as_i64().unwrap();
+
+    {
+        let conn = db.lock().unwrap();
+        let mut a = db::agent_by_slug(&conn, "w1").unwrap().unwrap();
+        a.model = "minimax-m3".into();
+        db::record_rung_start(&conn, ticket_id, &a, "nvidia").unwrap();
+    }
+
+    let (_, snap) = send(&app, "GET", "/api/state", None).await;
+    let rung = &snap["rungs"][ticket_id.to_string()];
+    assert_eq!(rung["label"], "nvidia/minimax-m3");
+    assert_eq!(rung["kind"], "started", "an unfinished run is visibly in flight");
+}

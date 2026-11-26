@@ -153,7 +153,15 @@
     cursor:pointer;transition:.13s;position:relative;
   }
   .card:hover{border-color:#33405f;transform:translateY(-1px);box-shadow:0 8px 20px rgba(0,0,0,.35)}
-  .card .ref{font-family:ui-monospace,monospace;font-size:10px;color:var(--dim);letter-spacing:.02em}
+  .card .ref{font-family:ui-monospace,monospace;font-size:10px;color:var(--dim);letter-spacing:.02em;
+    display:flex;align-items:center;gap:6px;min-width:0}
+  .card .ref .rd{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* the model working the ticket: provider/model, right of the ref, truncated
+    rather than pushing the card wider. Violet when a run is live. */
+  .card .ref .mdl{margin-left:auto;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    color:#8b95ad;background:#12151e;border:1px solid var(--line);border-radius:5px;padding:0 5px;
+    font-size:9px;letter-spacing:0;max-width:62%}
+  .card .ref .mdl.live{color:#c4b5fd;border-color:#3b2a52;background:#1a1526}
   .card .ttl{margin:3px 0 7px;font-size:12.5px;line-height:1.4;color:#e9ecf5}
   .card .meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
   .pill{font-size:10px;padding:1px 6px;border-radius:6px;border:1px solid var(--line);color:var(--mut);background:#12151e;white-space:nowrap}
@@ -807,6 +815,13 @@ function visibleTickets() {
 
 function card(t) {
   const p = t.priority;
+  // Which model is (or was last) on this ticket: `provider/model`, from the
+  // rung its latest run opened. Shown in the header next to the ref and
+  // division, because that is where you look to know who is working.
+  const rung = S.snap.rungs ? S.snap.rungs[t.id] : null;
+  const modelTag = rung && rung.label
+    ? `<span class="mdl${rung.kind === "started" ? " live" : ""}" title="${esc(rung.label)}${rung.kind === "started" ? " — running now" : rung.kind === "ok" ? " — last run succeeded" : ` — last run: ${esc(rung.kind)}`}">${esc(rung.label)}</span>`
+    : "";
   // The classified reason for a failed/blocked ticket: a tag you can click to
   // filter the whole board by that failure kind, plus its one-line detail.
   const att = S.snap.attempts ? S.snap.attempts[t.id] : null;
@@ -821,7 +836,7 @@ function card(t) {
         `<div><b>${esc(c.ref)}</b> ${esc(c.title)}</div>`).join("")}
         ${t.children.length > 3 ? `<div>+${t.children.length-3} more</div>` : ""}</div>` : "";
   return `<div class="card ${t.status==="done"?"done":""} ${["blocked","failed"].includes(t.status)?"blocked":""}" data-ref="${esc(t.ref)}">
-    <div class="ref">${esc(t.ref)} · ${esc(t.division_slug)}</div>
+    <div class="ref"><span class="rd">${esc(t.ref)} · ${esc(t.division_slug)}</span>${modelTag}</div>
     <div class="ttl">${esc(t.title)}</div>
     <div class="meta">
       <span class="pill p${p}">P${p}</span>

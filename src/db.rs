@@ -1289,9 +1289,50 @@ pub fn rollup_parent(conn: &Connection, child_id: i64) -> Result<()> {
 
 // ---------------------------------------------------------------- failures
 
-/// Record a classified failure. Called once per failed agent run.
+/// The last rung an agent tried on a ticket, whatever the outcome.
+///
+/// Attempts used to be written only on failure, so a ticket that succeeded on
+/// its first run had no record of which model did the work and the board could
+/// only label failures. Every run now writes its `started` row up front, which
+/// makes this the single source for "who is on this card" as well as "why it
+/// broke".
+#[derive(Debug, Clone, Serialize)]
+pub struct Rung {
+    pub provider: String,
+    /// The model id exactly as dispatched — a bare `deepseek-v4.1-flash` stays
+    /// bare, an already-qualified `nvidia/minimax-m3` is not prefixed twice.
+    pub model: String,
+    pub kind: String,
+    /// `provider/model`, assembled here so the board never re-derives it.
+    pub label: String,
+}
+
+/// `provider/model` as the board shows it. A model that already carries its
+/// provider (or none at all) is not decorated with a second copy of it.
+///
+/// An empty model means "the adapter picked its own default" — there is no
+/// name to show, so the label is empty rather than a bare provider like
+/// `local`, which would read as a model called *local*.
+pub fn model_label(provider: &str, model: &str) -> String {
+    match (provider.trim(), model.trim()) {
+        (_, "") => String::new(),
+        ("", m) => m.to_string(),
+        (p, m) if m.starts_with(&format!("{p}/")) => m.to_string(),
+        (p, m) => format!("{p}/{m}"),
+    }
+}
+
+impl Rung {
+    /// The `provider/model` pair people talk about.
+    pub fn label(&self) -> String {
+        model_label(&self.provider, &self.model)
+    }
+}
+
+/// Write one attempt row. `kind` is `started` for a run in flight, a classified
+/// failure kind once it dies, and `ok` when it came back with output.
 #[allow(clippy::too_many_arguments)]
-pub fn record_attempt(
+fn insert_attempt(
     conn: &Connection,
     ticket_id: i64,
     agent: &Agent,
@@ -1318,6 +1359,90 @@ pub fn record_attempt(
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Record a classified failure. Called once per failed agent run.
+#[allow(clippy::too_many_arguments)]
+pub fn record_attempt(
+    conn: &Connection,
+    ticket_id: i64,
+    agent: &Agent,
+    provider: &str,
+    kind: &str,
+    detail: &str,
+    raw: &str,
+) -> Result<i64> {
+    insert_attempt(conn, ticket_id, agent, provider, kind, detail, raw)
+}
+
+/// Park a run that just started on this rung, before its output is known. The
+/// row is settled in place by `settle_rung` — one row per run, never two.
+pub fn record_rung_start(
+    conn: &Connection,
+    ticket_id: i64,
+    agent: &Agent,
+    provider: &str,
+) -> Result<i64> {
+    insert_attempt(
+        conn,
+        ticket_id,
+        agent,
+        provider,
+        "started",
+        "running",
+        "",
+    )
+}
+
+/// Settle the start row with what actually happened. Detail and raw text are
+/// left alone (a success has neither) unless the caller supplies a detail.
+pub fn settle_rung(conn: &Connection, attempt_id: i64, kind: &str, detail: &str) -> Result<()> {
+    if detail.is_empty() {
+        conn.execute("UPDATE attempts SET kind=?1 WHERE id=?2", params![kind, attempt_id])?;
+    } else {
+        conn.execute(
+            "UPDATE attempts SET kind=?1, detail=?2 WHERE id=?3",
+            params![kind, detail, attempt_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Attach the agent's raw output to an attempt row that was opened at start.
+pub fn set_attempt_raw(conn: &Connection, attempt_id: i64, raw: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE attempts SET raw=?1 WHERE id=?2",
+        params![raw, attempt_id],
+    )?;
+    Ok(())
+}
+
+/// The most recent rung each ticket's last run landed on, keyed by ticket id.
+/// A run left in `started` shows as in-flight; a settled one is labelled on
+/// failed/blocked cards with its failure kind.
+pub fn last_rung(conn: &Connection) -> Result<std::collections::HashMap<i64, Rung>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.ticket_id, a.provider, a.model, a.kind
+         FROM attempts a
+         JOIN (SELECT ticket_id, MAX(id) AS mid FROM attempts GROUP BY ticket_id) m
+           ON m.mid = a.id",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            let provider: String = r.get(1)?;
+            let model: String = r.get(2)?;
+            Ok((
+                r.get::<_, i64>(0)?,
+                Rung {
+                    label: model_label(&provider, &model),
+                    provider,
+                    model,
+                    kind: r.get(3)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().collect())
 }
 
 /// Attempts for one ticket, newest first — the board's "why did this fail".
@@ -1562,6 +1687,66 @@ mod tests {
     // ------------------------------------------------------------ providers
 
     use crate::providers::{delete, plaintext_key, set_key, store_models};
+
+    #[test]
+    fn a_model_label_is_not_qualified_twice() {
+        // The picker stores rungs as `provider/model`, but a provider that lists
+        // bare ids (Ollama, OpenRouter) also produces a bare model id. Both must
+        // render as one provider prefix, never `nvidia/nvidia/...`.
+        assert_eq!(model_label("nvidia", "minimax-m3"), "nvidia/minimax-m3");
+        assert_eq!(
+            model_label("nvidia", "nvidia/minimax-m3"),
+            "nvidia/minimax-m3"
+        );
+        assert_eq!(model_label("", "nvidia/minimax-m3"), "nvidia/minimax-m3");
+        assert_eq!(model_label("local", "qwen3.8:27b-ud-gguf"), "local/qwen3.8:27b-ud-gguf");
+        // An agent with no model set lets its CLI choose; there is no name to
+        // show, so a bare `local` must not be presented as one.
+        assert_eq!(model_label("local", ""), "");
+        assert_eq!(model_label("", ""), "");
+    }
+
+    /// Every run opens its rung row before the process starts, so the board can
+    /// name the model working a ticket that has never failed. Only the latest
+    /// run per ticket should come back.
+    #[test]
+    fn the_last_rung_names_the_model_on_a_ticket() {
+        let db = mem();
+        let conn = db.lock().unwrap();
+        let d = create_division(&conn, "d", "D", "", "/tmp").unwrap();
+        let agent_id = create_agent(&conn, "w", "W", "worker", Some(d), "opencode", "", "").unwrap();
+        let t = create_ticket(&conn, d, None, "T", "", 2, Some(agent_id), "human", "queued").unwrap();
+        let mut a = agents(&conn, None).unwrap().into_iter().find(|a| a.id == agent_id).unwrap();
+        a.model = "deepseek-v4.1-flash".into();
+        let other = create_ticket(&conn, d, None, "U", "", 2, None, "human", "new").unwrap();
+
+        let first = record_rung_start(&conn, t.id, &a, "nvidia").unwrap();
+        settle_rung(&conn, first, "rate_limit", "429").unwrap();
+        let second = record_rung_start(&conn, t.id, &a, "opencode").unwrap();
+        settle_rung(&conn, second, "ok", "").unwrap();
+
+        let rungs = last_rung(&conn).unwrap();
+        let r = rungs.get(&t.id).expect("a ticket with a run must have a rung");
+        assert_eq!(
+            r.label, "opencode/deepseek-v4.1-flash",
+            "the rung is the last run, not the first"
+        );
+        assert_eq!(r.kind, "ok");
+        assert!(!rungs.contains_key(&other.id), "a ticket nobody ran yet has no rung");
+
+        // An agent with no model named has nothing to show in the header.
+        let bare = create_agent(&conn, "b", "B", "worker", Some(d), "hermes", "", "").unwrap();
+        let bare = agents(&conn, None).unwrap().into_iter().find(|a| a.id == bare).unwrap();
+        let third = create_ticket(&conn, d, None, "V", "", 2, None, "human", "new").unwrap();
+        record_rung_start(&conn, third.id, &bare, "local").unwrap();
+        assert_eq!(last_rung(&conn).unwrap()[&third.id].label, "");
+
+        // One row per run: settling must not add a second row.
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM attempts WHERE ticket_id=?1", [t.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+    }
 
     /// Every seeded provider must agree with the provider id that rotation
     /// derives from a model string. A rung whose stored provider disagrees with
